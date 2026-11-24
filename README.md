@@ -4,8 +4,7 @@ Open-source dashboard that estimates **dealer positioning in options** for day t
 **SPY, QQQ and IWM**: Gamma Exposure (GEX), Vanna Exposure (VEX), the Zero Gamma
 (gamma flip) level and the Call / Put Walls.
 
-![Open-GEX screenshot](docs/screenshot.png)
-<!-- Screenshot placeholder: add docs/screenshot.png -->
+![Open-GEX screenshot: SPY 0DTE during the session](docs/screenshot.png)
 
 ## Features
 
@@ -107,6 +106,9 @@ Contracts are dropped if they have missing values, open interest ≤ 0, an IV ou
 - **European** Black-Scholes is applied to **American** options on ETFs (early
   exercise is ignored).
 - Rates and dividend yields are **static** values from `config.py` / `.env`.
+- Outside regular trading hours (pre-market in particular), Yahoo often reports
+  zero open interest and placeholder IVs: the yfinance chart is then empty and the
+  UI says so. Use the dashboard during the session.
 - yfinance data is unofficial and delayed; Massive data may be delayed depending
   on your plan.
 
