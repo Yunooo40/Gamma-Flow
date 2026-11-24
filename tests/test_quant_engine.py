@@ -112,3 +112,24 @@ def test_clean_chain_drops_invalid_rows() -> None:
     cleaned = qe.clean_chain(pd.concat([chain, expired], ignore_index=True), SPOT, NOW)
     assert cleaned["strike"].tolist() == [100.0]
     assert cleaned["option_type"].tolist() == ["call"]
+
+
+@pytest.mark.parametrize("option_type", ["call", "put"])
+@pytest.mark.parametrize("strike", [90.0, 100.0, 110.0])
+def test_calculate_iv_inverts_bs_price(option_type: str, strike: float) -> None:
+    t, r, q = 30 / 365, 0.04, 0.012
+    price = qe.bs_price(SPOT, strike, t, 0.25, r, q, option_type)
+    assert qe.calculate_iv(price, SPOT, strike, t, r, option_type, q) == pytest.approx(0.25, rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("price", "strike", "option_type"),
+    [
+        (5.0, 90.0, "call"),  # below intrinsic value (10): brentq would crash
+        (10.0, 110.0, "put"),  # exactly intrinsic value
+        (math.nan, 100.0, "call"),  # no price
+        (150.0, 100.0, "call"),  # above the price at sigma = 1000 %: no root in the bounds
+    ],
+)
+def test_calculate_iv_returns_nan_when_unsolvable(price: float, strike: float, option_type: str) -> None:
+    assert math.isnan(qe.calculate_iv(price, SPOT, strike, 30 / 365, 0.04, option_type))

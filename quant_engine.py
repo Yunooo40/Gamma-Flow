@@ -15,6 +15,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike, NDArray
+from scipy.optimize import brentq
+from scipy.special import ndtr
 from scipy.stats import norm
 
 import config
@@ -67,6 +69,35 @@ def bs_vanna(
     """Vanna = dDelta/dSigma = -e^(-qT) * phi(d1) * d2 / sigma, identical for calls and puts."""
     d1, d2 = _d1_d2(spot, strike, t, sigma, r, q)
     return -np.exp(-q * np.asarray(t)) * norm.pdf(d1) * d2 / np.asarray(sigma)
+
+
+def bs_price(spot: float, strike: float, t: float, sigma: float, r: float, q: float, option_type: str) -> float:
+    """Black-Scholes-Merton price of a European call or put."""
+    d1, d2 = _d1_d2(spot, strike, t, sigma, r, q)
+    sign = 1.0 if option_type == "call" else -1.0
+    # ndtr instead of norm.cdf: same normal CDF, ~200x faster on scalars (called in a solver loop).
+    return float(sign * (spot * np.exp(-q * t) * ndtr(sign * d1) - strike * np.exp(-r * t) * ndtr(sign * d2)))
+
+
+def calculate_iv(
+    target_price: float, spot: float, strike: float, t: float, r: float, option_type: str, q: float = 0.0
+) -> float:
+    """Implied volatility: the sigma where ``bs_price`` equals ``target_price`` (Brent's method).
+
+    NaN when the price is missing, at or below intrinsic value (no root for brentq), or
+    not reachable within ``IV_SOLVER_BOUNDS`` (e.g. a stale price).
+    """
+    intrinsic = max(spot - strike, 0.0) if option_type == "call" else max(strike - spot, 0.0)
+    if not target_price > intrinsic:  # also rejects NaN prices
+        return np.nan
+
+    def error(sigma: float) -> float:
+        return bs_price(spot, strike, t, sigma, r, q, option_type) - target_price
+
+    try:
+        return float(brentq(error, *config.IV_SOLVER_BOUNDS))
+    except (ValueError, RuntimeError):  # no sign change within the bounds, or no convergence
+        return np.nan
 
 
 def clean_chain(chain: pd.DataFrame, spot: float, now: datetime) -> pd.DataFrame:

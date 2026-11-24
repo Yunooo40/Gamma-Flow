@@ -74,10 +74,18 @@ function setLevel(id, level, spot, missingText) {
   $(`kpi-${id}-sub`).textContent = level == null || spot == null ? missingText : fmtDistance(level, spot);
 }
 
+function setTotal(id, value, greek) {
+  const el = $(`kpi-${id}`);
+  el.textContent = fmtMoney(value);
+  el.style.color = value == null ? "" : value >= 0 ? COLORS.positive : COLORS.negative;
+  $(`kpi-${id}-sub`).textContent = value == null ? "–" : `${value >= 0 ? "Positive" : "Negative"} ${greek}`;
+}
+
 function renderHeader(d) {
   const badge = $("source-badge");
-  const delayed = d.source !== "massive" || d.timeframe !== "REAL-TIME";
-  badge.textContent = d.source === "massive" ? `Massive · ${d.timeframe ?? "unknown"}` : "yfinance · delayed";
+  const delayed = d.source === "yfinance" || d.timeframe !== "REAL-TIME";
+  const names = { alpaca: "Alpaca", massive: "Massive" };
+  badge.textContent = d.source in names ? `${names[d.source]} · ${d.timeframe ?? "unknown"}` : "yfinance · delayed";
   badge.className = `badge ${delayed ? "badge-delayed" : "badge-live"}`;
 
   const time = new Date(d.fetched_at).toLocaleTimeString("en-US", {
@@ -98,11 +106,8 @@ function renderKpis(d) {
   setLevel("cw", d.levels.call_wall, d.spot, "–");
   setLevel("pw", d.levels.put_wall, d.spot, "–");
 
-  const net = d.totals.net_gex;
-  const gex = $("kpi-gex");
-  gex.textContent = fmtMoney(net);
-  gex.style.color = net == null ? "" : net >= 0 ? COLORS.positive : COLORS.negative;
-  $("kpi-gex-sub").textContent = net == null ? "–" : net >= 0 ? "Positive gamma" : "Negative gamma";
+  setTotal("gex", d.totals.net_gex, "gamma");
+  setTotal("vex", d.totals.net_vex, "vanna");
 }
 
 function levelLines(d) {
@@ -140,11 +145,13 @@ function renderChart() {
   };
 
   const lines = levelLines(d);
+  // shortcut: screen size is read at each render, not on resize; add a resize listener if rotation matters.
+  const small = window.innerWidth < 768;
   const layout = {
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
     font: { color: COLORS.text, size: 11, family: "ui-monospace, SFMono-Regular, Menlo, monospace" },
-    margin: { l: 56, r: 16, t: 8, b: 40 },
+    margin: { l: 56, r: small ? 8 : 16, t: 8, b: 40 },
     bargap: 0.15,
     showlegend: false,
     hoverlabel: { bgcolor: "#111318", bordercolor: "#374151", font: { color: "#e5e7eb" } },
@@ -172,7 +179,7 @@ function renderChart() {
     })),
     annotations: lines.map((line) => ({
       xref: "paper",
-      x: 1,
+      x: 0.98,
       xanchor: "right",
       yref: "y",
       y: line.y,
@@ -180,9 +187,15 @@ function renderChart() {
       text: `${line.label} ${line.y.toFixed(2)}`,
       showarrow: false,
       font: { color: line.color, size: 10 },
+      bgcolor: "rgba(15, 23, 42, 0.85)", // stays readable over bars of the same color
+      borderpad: 3,
     })),
   };
-  Plotly.react("chart", [trace], layout, { responsive: true, displaylogo: false });
+  Plotly.react("chart", [trace], layout, {
+    responsive: true,
+    displaylogo: false,
+    displayModeBar: small ? false : "hover", // on phones the toolbar covers the bars
+  });
 }
 
 function render() {
@@ -194,8 +207,10 @@ function render() {
 
 function clearDisplay() {
   state.data = null;
-  for (const id of ["kpi-spot", "kpi-zg", "kpi-cw", "kpi-pw", "kpi-gex"]) $(id).textContent = "–";
-  for (const id of ["kpi-spot-sub", "kpi-zg-sub", "kpi-cw-sub", "kpi-pw-sub", "kpi-gex-sub"]) $(id).textContent = "";
+  for (const id of ["kpi-spot", "kpi-zg", "kpi-cw", "kpi-pw", "kpi-gex", "kpi-vex"]) $(id).textContent = "–";
+  for (const id of ["kpi-spot-sub", "kpi-zg-sub", "kpi-cw-sub", "kpi-pw-sub", "kpi-gex-sub", "kpi-vex-sub"]) {
+    $(id).textContent = "";
+  }
   $("source-badge").textContent = "–";
   $("updated").textContent = "–";
   Plotly.purge("chart");

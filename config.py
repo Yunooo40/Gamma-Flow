@@ -36,6 +36,7 @@ ZERO_GAMMA_CHUNK_SIZE: int = 5000  # contracts per block in the profile matrix
 RISK_FREE_RATE: float = float(os.getenv("RISK_FREE_RATE", "0.04"))
 # Approximate trailing dividend yields: update periodically.
 DIVIDEND_YIELDS: dict[str, float] = {"SPY": 0.012, "QQQ": 0.006, "IWM": 0.012}
+IV_SOLVER_BOUNDS: tuple[float, float] = (1e-4, 10.0)  # implied-vol search range: 0.01 % to 1000 %
 IV_MIN: float = 0.01
 IV_MAX: float = 3.0
 MIN_T_MINUTES: int = 15
@@ -49,6 +50,12 @@ MARKET_TZ: ZoneInfo = ZoneInfo("America/New_York")
 MARKET_CLOSE: time = time(16, 0)
 
 # --- Data sources -------------------------------------------------------------
+ALPACA_KEY: str = os.getenv("ALPACA_KEY", "").strip()
+ALPACA_SECRET: str = os.getenv("ALPACA_SECRET", "").strip()
+ALPACA_FEED: str = os.getenv("ALPACA_FEED", "indicative")  # "opra" needs a paid plan
+ALPACA_DATA_URL: str = "https://data.alpaca.markets"
+ALPACA_TRADING_URL: str = os.getenv("ALPACA_TRADING_URL", "https://paper-api.alpaca.markets").rstrip("/")
+ALPACA_MAX_PAGES: int = 200
 MASSIVE_API_KEY: str = os.getenv("MASSIVE_API_KEY", "").strip()
 MASSIVE_BASE_URL: str = os.getenv("MASSIVE_BASE_URL", "https://api.massive.com").rstrip("/")
 MASSIVE_PAGE_LIMIT: int = 250
