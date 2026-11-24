@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -12,7 +13,7 @@ import pytest
 
 import config
 import data_fetcher
-from quant_engine import CHAIN_COLUMNS
+from quant_engine import CHAIN_COLUMNS, bs_price, time_to_expiry
 
 NY = ZoneInfo("America/New_York")
 MONDAY = date(2026, 11, 23)
@@ -25,6 +26,8 @@ BASE_URL = "https://api.massive.com"
 def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     monkeypatch.setattr(config, "CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(config, "MASSIVE_API_KEY", "")
+    monkeypatch.setattr(config, "ALPACA_KEY", "")  # real keys from .env must never reach the network
+    monkeypatch.setattr(config, "ALPACA_SECRET", "")
     monkeypatch.setattr(config, "MASSIVE_BASE_URL", BASE_URL)
 
 
@@ -211,3 +214,42 @@ def test_cache_round_trip_and_expiry(fake_yfinance: type[FakeYfTicker]) -> None:
     closing = datetime(2026, 11, 23, 15, 55, tzinfo=NY)
     data_fetcher.get_chain("SPY", "0dte", closing)
     assert not data_fetcher.get_chain("SPY", "0dte", closing + timedelta(minutes=6)).cached
+
+
+def test_alpaca_solves_iv_from_option_prices(
+    monkeypatch: pytest.MonkeyPatch, fake_yfinance: type[FakeYfTicker]
+) -> None:
+    monkeypatch.setattr(config, "ALPACA_KEY", "k")
+    monkeypatch.setattr(config, "ALPACA_SECRET", "s")
+    spot, r, q = 601.5, config.RISK_FREE_RATE, config.DIVIDEND_YIELDS["SPY"]
+    t = time_to_expiry(pd.Series([MONDAY]), MONDAY_MORNING)[0]
+    call, put = bs_price(spot, 600, t, 0.15, r, q, "call"), bs_price(spot, 595, t, 0.17, r, q, "put")
+    snaps1 = {
+        "snapshots": {"SPY261123C00600000": {"latestQuote": {"bp": call - 0.05, "ap": call + 0.05}}},
+        "next_page_token": "p2",
+    }
+    snaps2 = {
+        "snapshots": {
+            # No bid: the book is ignored and the last trade is used.
+            "SPY261123P00595000": {"latestQuote": {"bp": 0, "ap": put + 1}, "latestTrade": {"p": put}},
+            "SPY261123C00650000": {"latestQuote": {"bp": 0, "ap": 0}},  # no price at all
+            "SPY261124C00600000": {"latestQuote": {"bp": 1.0, "ap": 1.2}},  # not the nearest expiry
+        }
+    }
+    contracts = {"option_contracts": [
+        {"symbol": "SPY261123C00600000", "open_interest": "1500"},
+        {"symbol": "SPY261123P00595000", "open_interest": "2000"},
+    ]}
+    responses = [FakeResponse(200, p) for p in (snaps1, snaps2, contracts, {"trade": {"p": 601.5}})]
+    calls = install_massive(monkeypatch, responses)
+
+    snap = data_fetcher.get_chain("SPY", "0dte", MONDAY_MORNING)
+
+    assert snap.source == "alpaca" and snap.spot == 601.5 and snap.expirations == [MONDAY]
+    assert calls[1]["params"]["page_token"] == "p2"
+    assert calls[0]["headers"]["APCA-API-KEY-ID"] == "k"
+    assert sorted(zip(snap.chain["strike"], snap.chain["open_interest"])) == [(595.0, 2000), (600.0, 1500), (650.0, 0)]
+    iv = dict(zip(snap.chain["strike"], snap.chain["implied_volatility"]))
+    assert iv[600.0] == pytest.approx(0.15, rel=1e-6) and iv[595.0] == pytest.approx(0.17, rel=1e-6)
+    assert math.isnan(iv[650.0])
+    assert tuple(snap.chain.columns) == CHAIN_COLUMNS

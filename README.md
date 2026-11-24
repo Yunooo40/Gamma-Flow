@@ -11,11 +11,11 @@ Open-source dashboard that estimates **dealer positioning in options** for day t
 - Net GEX and net Vanna by strike, as a horizontal bar chart (Plotly), with Spot,
   Zero Gamma, Call Wall and Put Wall lines.
 - KPI cards: spot, Zero Gamma, Call Wall, Put Wall (each with its distance to spot)
-  and total net GEX (positive / negative gamma regime).
+  and total net GEX and net VEX (positive / negative regime).
 - Two expiry filters: **0DTE** (today's expiry, or the next one after the close, on
   weekends and holidays) and **All** (every expiry up to 45 days).
-- Data from **Massive** (formerly Polygon.io) when an API key is configured, with an
-  automatic, clearly flagged fallback to **yfinance**.
+- Data from **Alpaca** (free paper account) or **Massive** (formerly Polygon.io) when
+  keys are configured, with an automatic, clearly flagged fallback to **yfinance**.
 - 15-minute disk cache, auto-refresh every 5 minutes, dark "trading desk" theme.
 - Greeks recomputed for every contract with the same Black-Scholes-Merton
   assumptions, whatever the data source.
@@ -28,7 +28,7 @@ Requires Python 3.11+.
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env               # optional: add your Massive API key
+cp .env.example .env               # optional: add your Alpaca or Massive keys
 python app.py
 ```
 
@@ -38,11 +38,12 @@ Then open <http://127.0.0.1:5000>.
 
 | Source | When | Notes |
 |---|---|---|
+| [Alpaca](https://alpaca.markets) | `ALPACA_KEY` and `ALPACA_SECRET` are set | Tried first. A free paper account is enough: the `indicative` feed gives quotes but **no IV**, so the IV is solved from each option price (see below). Open interest comes from the Trading API, the spot from the latest IEX trade. |
 | [Massive](https://massive.com) (formerly Polygon.io) | `MASSIVE_API_KEY` is set | Requires a plan **with options data** (Options Starter or higher). The `timeframe` reported by the API (`REAL-TIME` or `DELAYED`) is shown in the UI. |
-| [yfinance](https://github.com/ranaroussi/yfinance) | No key, or Massive failed | **Unofficial** Yahoo Finance scraper, data **delayed ~15 min**, may break without notice. One request per expiry, so the first load of the *All* filter takes a few seconds. |
+| [yfinance](https://github.com/ranaroussi/yfinance) | No key, or the sources above failed | **Unofficial** Yahoo Finance scraper, data **delayed ~15 min**, may break without notice. One request per expiry, so the first load of the *All* filter takes a few seconds. |
 
-If Massive fails (invalid key, no options plan, rate limit, timeout, bad response),
-the app logs a warning, shows it in the UI and falls back to yfinance. If yfinance
+If a source fails (invalid key, no options plan, rate limit, timeout, bad response),
+the app logs a warning, shows it in the UI and tries the next one. If yfinance
 fails too, the API returns `502` and the UI shows the error. No synthetic data is
 ever generated.
 
@@ -60,6 +61,15 @@ d2    = d1 − σ·√T
 Gamma = e^(−q·T) · φ(d1) / (S · σ · √T)          (same for calls and puts)
 Vanna = −e^(−q·T) · φ(d1) · d2 / σ               (∂Delta/∂σ, same for calls and puts)
 ```
+
+**Implied volatility (Alpaca only).** The option price is the quote mid
+`(bid + ask) / 2`; with a one-sided or empty book it falls back to the last trade,
+then the day's close. The IV is the `σ` where the BSM price above equals that price,
+solved with Brent's method (`scipy.optimize.brentq`) in `[0.01 %, 1000 %]`. A price at
+or below intrinsic value, or with no root in that range, leaves the IV empty and the
+contract is dropped. Because `T` is calendar time, a 0DTE IV before the open looks
+high (the price covers the whole session); Gamma only depends on `σ·√T` and is not
+affected.
 
 `T` is the time to the 16:00 New York close of the expiry day, in years
 (365-day basis), floored at 15 minutes so that Greeks stay finite near expiry.
@@ -118,6 +128,9 @@ Environment variables (`.env`):
 
 | Variable | Default | Description |
 |---|---|---|
+| `ALPACA_KEY` / `ALPACA_SECRET` | *(empty)* | Alpaca API key pair (a paper account works). Sent only in headers. |
+| `ALPACA_FEED` | `indicative` | Options feed: `indicative` (free) or `opra` (paid plan and signed OPRA agreement). |
+| `ALPACA_TRADING_URL` | `https://paper-api.alpaca.markets` | Trading API used for open interest; use `https://api.alpaca.markets` with live keys. |
 | `MASSIVE_API_KEY` | *(empty)* | Massive API key with options access. Sent only in the `Authorization` header. |
 | `MASSIVE_BASE_URL` | `https://api.massive.com` | Massive API base URL. |
 | `RISK_FREE_RATE` | `0.04` | Annual risk-free rate (decimal). |

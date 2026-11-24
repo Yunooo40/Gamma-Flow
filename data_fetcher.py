@@ -1,4 +1,4 @@
-"""Market data ingestion: Massive (formerly Polygon.io) first, yfinance as fallback.
+"""Market data ingestion: Alpaca, then Massive (formerly Polygon.io), then yfinance.
 
 All network and file I/O lives here. Every source is normalized to the same
 chain schema (``quant_engine.CHAIN_COLUMNS``) and cached on disk as JSON.
@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 import threading
 from collections.abc import Iterable
@@ -26,7 +27,7 @@ import requests
 import yfinance as yf
 
 import config
-from quant_engine import CHAIN_COLUMNS
+from quant_engine import CHAIN_COLUMNS, calculate_iv, time_to_expiry
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ class ChainSnapshot:
     ticker: str
     spot: float
     chain: pd.DataFrame
-    source: Literal["massive", "yfinance"]
+    source: Literal["alpaca", "massive", "yfinance"]
     timeframe: str | None
     fetched_at: datetime
     expirations: list[date]
@@ -126,7 +127,144 @@ def _valid_price(price: float) -> bool:
     return math.isfinite(price) and price > 0
 
 
-# --- Source A: Massive --------------------------------------------------------
+# --- Source A: Alpaca ---------------------------------------------------------
+
+_OCC = re.compile(r"^[A-Z]{1,6}(\d{6})([CP])(\d{8})$")
+
+
+def _alpaca_get(session: requests.Session, url: str, params: dict[str, Any]) -> dict[str, Any]:
+    """GET one Alpaca page; any failure becomes a ``_SourceError``."""
+    try:
+        response = session.get(url, params=params, timeout=config.HTTP_TIMEOUT)
+    except requests.RequestException as exc:
+        raise _SourceError(f"request failed ({type(exc).__name__})") from exc
+    if response.status_code in (401, 403):
+        raise _SourceError(f"HTTP {response.status_code}, check the Alpaca keys")
+    if response.status_code != 200:
+        raise _SourceError(f"HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise _SourceError("invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise _SourceError("unexpected payload")
+    return payload
+
+
+def _alpaca_pages(session: requests.Session, url: str, params: dict[str, Any], key: str) -> Iterable[Any]:
+    """Items under ``key`` across all pages (``next_page_token``)."""
+    params = dict(params)
+    for _ in range(config.ALPACA_MAX_PAGES):
+        payload = _alpaca_get(session, url, params)
+        yield from (payload.get(key) or {}).items() if key == "snapshots" else payload.get(key) or []
+        token = payload.get("next_page_token")
+        if not token:
+            return
+        params["page_token"] = token
+    raise _SourceError(f"more than {config.ALPACA_MAX_PAGES} pages")
+
+
+def _alpaca_price(snap: dict[str, Any]) -> float:
+    """Option price: quote mid, else last trade, else the day's close; NaN if none (contract skipped)."""
+    quote = snap.get("latestQuote") or {}
+    bid, ask = quote.get("bp") or 0, quote.get("ap") or 0
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2
+    # One-sided or empty book (pre-market, weekend): fall back to the last known price.
+    for bar, key in (("latestTrade", "p"), ("dailyBar", "c")):
+        price = (snap.get(bar) or {}).get(key) or 0
+        if price > 0:
+            return float(price)
+    return math.nan
+
+
+def _parse_alpaca_chain(snapshots: dict[str, Any], open_interest: dict[str, Any]) -> pd.DataFrame:
+    """Raw chain rows with the option ``price``, from snapshots (by OCC symbol) joined with open interest."""
+    rows = []
+    for symbol, snap in snapshots.items():
+        match = _OCC.match(symbol)
+        if not match:
+            continue
+        yymmdd, kind, strike = match.groups()
+        rows.append(
+            {
+                "strike": int(strike) / 1000,
+                "option_type": "call" if kind == "C" else "put",
+                "expiration": datetime.strptime(yymmdd, "%y%m%d").date(),
+                "open_interest": open_interest.get(symbol),
+                "price": _alpaca_price(snap or {}),
+            }
+        )
+    return pd.DataFrame(rows, columns=["strike", "option_type", "expiration", "open_interest", "price"])
+
+
+def _fetch_alpaca(ticker: str, expiry_filter: str, now: datetime) -> ChainSnapshot:
+    today, before_close = _market_now(now)
+    first = today if before_close else today + timedelta(days=1)
+    last = first + timedelta(days=config.MASSIVE_0DTE_LOOKAHEAD_DAYS) if expiry_filter == "0dte" else today + timedelta(days=config.MAX_DTE_ALL)
+    window = {"expiration_date_gte": first.isoformat(), "expiration_date_lte": last.isoformat()}
+
+    with requests.Session() as session:
+        session.headers.update({"APCA-API-KEY-ID": config.ALPACA_KEY, "APCA-API-SECRET-KEY": config.ALPACA_SECRET})
+        snapshots = dict(
+            _alpaca_pages(
+                session,
+                f"{config.ALPACA_DATA_URL}/v1beta1/options/snapshots/{ticker}",
+                {"feed": config.ALPACA_FEED, "limit": 1000, **window},
+                "snapshots",
+            )
+        )
+        if not snapshots:
+            raise _SourceError("empty response")
+        # The Trading API carries open interest (the data API does not), as strings.
+        open_interest = {
+            c["symbol"]: c.get("open_interest")
+            for c in _alpaca_pages(
+                session,
+                f"{config.ALPACA_TRADING_URL}/v2/options/contracts",
+                {"underlying_symbols": ticker, "limit": 10000, **window},
+                "option_contracts",
+            )
+        }
+        try:
+            trade = _alpaca_get(session, f"{config.ALPACA_DATA_URL}/v2/stocks/{ticker}/trades/latest", {"feed": "iex"})
+            spot: float | None = float(trade["trade"]["p"])
+        except (_SourceError, KeyError, TypeError, ValueError):
+            spot = None
+
+    warnings: list[str] = []
+    raw = _parse_alpaca_chain(snapshots, open_interest)
+    expirations, fallback, expiry_warnings = select_expirations(raw["expiration"].dropna(), expiry_filter, now)
+    if not expirations:
+        raise _SourceError("no live expiry in response")
+    warnings += expiry_warnings
+    if spot is None or not _valid_price(spot):
+        spot = _yfinance_spot(yf.Ticker(ticker))
+        warnings.append("Alpaca: underlying price missing, spot taken from yfinance (delayed)")
+
+    # The indicative feed has no IV: solve it from each price with the same BSM model as the Greeks.
+    # Unsolved contracts keep a NaN IV and are dropped by quant_engine.clean_chain.
+    raw = raw[raw["expiration"].isin(expirations)].reset_index(drop=True)
+    r, q, t = config.RISK_FREE_RATE, config.DIVIDEND_YIELDS[ticker], time_to_expiry(raw["expiration"], now)
+    raw["implied_volatility"] = [
+        calculate_iv(price, spot, strike, t_i, r, kind, q)
+        for price, strike, t_i, kind in zip(raw["price"], raw["strike"], t, raw["option_type"])
+    ]
+
+    return ChainSnapshot(
+        ticker=ticker,
+        spot=spot,
+        chain=_normalize_chain(raw),
+        source="alpaca",
+        timeframe="REAL-TIME" if config.ALPACA_FEED == "opra" else "INDICATIVE",
+        fetched_at=now.astimezone(timezone.utc),
+        expirations=expirations,
+        expiry_fallback=fallback,
+        warnings=warnings,
+    )
+
+
+# --- Source B: Massive --------------------------------------------------------
 
 
 def _parse_massive_chain(flat: pd.DataFrame) -> pd.DataFrame:
@@ -227,7 +365,7 @@ def _fetch_massive(ticker: str, expiry_filter: str, now: datetime) -> ChainSnaps
     )
 
 
-# --- Source B: yfinance -------------------------------------------------------
+# --- Source C: yfinance -------------------------------------------------------
 
 
 def _parse_yfinance_chain(option_chain: Any, expiration: date) -> pd.DataFrame:
@@ -295,14 +433,21 @@ def _fetch_yfinance(ticker: str, expiry_filter: str, now: datetime) -> ChainSnap
 
 
 def _fetch(ticker: str, expiry_filter: str, now: datetime) -> ChainSnapshot:
-    """Try Massive (if a key is set), then yfinance."""
+    """Try Alpaca, then Massive (each only if configured), then yfinance."""
     warnings: list[str] = []
+    sources = []
+    if config.ALPACA_KEY and config.ALPACA_SECRET:
+        sources.append(("Alpaca", _fetch_alpaca))
     if config.MASSIVE_API_KEY:
+        sources.append(("Massive", _fetch_massive))
+    for name, fetch in sources:
         try:
-            return _fetch_massive(ticker, expiry_filter, now)
-        except Exception as exc:  # any Massive failure must fall back, never crash
-            logger.warning("Massive failed for %s (%s), falling back to yfinance", ticker, exc)
-            warnings.append(f"Massive unavailable ({exc}), using yfinance")
+            snapshot = fetch(ticker, expiry_filter, now)
+            snapshot.warnings[:0] = warnings
+            return snapshot
+        except Exception as exc:  # any failure must fall back, never crash
+            logger.warning("%s failed for %s (%s), falling back", name, ticker, exc)
+            warnings.append(f"{name} unavailable ({exc})")
     snapshot = _fetch_yfinance(ticker, expiry_filter, now)
     snapshot.warnings[:0] = warnings
     return snapshot
