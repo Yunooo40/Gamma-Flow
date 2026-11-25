@@ -31,6 +31,8 @@ DISPLAY_RANGE_PCT: dict[str, float] = {"0dte": 0.03, "all": 0.10}
 ZERO_GAMMA_SEARCH_PCT: float = 0.10
 ZERO_GAMMA_GRID_POINTS: int = 201
 ZERO_GAMMA_CHUNK_SIZE: int = 5000  # contracts per block in the profile matrix
+VANNA_SURFACE_SPOT_PCT: float = 0.10  # simulated spots of the vanna surface: spot +/- 10 %
+VANNA_SURFACE_IV_SHOCK: tuple[float, float] = (0.80, 1.20)  # IV multipliers: -20 % to +20 %
 
 # --- Pricing model ------------------------------------------------------------
 RISK_FREE_RATE: float = float(os.getenv("RISK_FREE_RATE", "0.04"))

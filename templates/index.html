@@ -100,6 +100,31 @@
       <span>Expected Move <span id="vol-em" class="num text-cyan-300">–</span></span>
     </section>
 
+    <section>
+      <button id="vanna-3d-btn" type="button" aria-expanded="false" aria-controls="vanna-3d-container"
+        class="flex w-full items-center justify-center gap-2 rounded-md border border-cyan-500/30 bg-cyan-500/5 px-4 py-2 text-sm font-medium text-cyan-200 transition-colors hover:border-cyan-400/60 hover:bg-cyan-500/10 hover:text-white">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z"></path>
+          <path d="m3 7 9 5 9-5M12 12v10"></path>
+        </svg>
+        Analyze 3D Vanna Surface
+      </button>
+      <div id="vanna-3d-container" class="card mt-3 p-4" hidden>
+        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h2 id="vanna-3d-title" class="text-sm font-medium text-neutral-300">Net VEX surface</h2>
+          <span id="vanna-3d-loading" class="items-center gap-2 text-xs text-neutral-400" role="status" style="display: none">
+            <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"></circle>
+              <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"></path>
+            </svg>
+            Computing surface…
+          </span>
+        </div>
+        <p id="vanna-3d-error" class="text-sm text-red-400" role="alert" hidden></p>
+        <div id="vanna-3d" class="h-[60vh] min-h-[380px] w-full"></div>
+      </div>
+    </section>
+
     <section class="card p-4">
       <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h2 id="chart-title" class="text-sm font-medium text-neutral-300">Net GEX by strike</h2>

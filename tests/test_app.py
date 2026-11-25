@@ -128,3 +128,28 @@ def test_nan_and_infinity_become_null(client: FlaskClient, monkeypatch: pytest.M
     assert payload["levels"]["call_wall"] is None
     assert payload["totals"] == {"net_gex": None, "net_vex": None}
     assert payload["strikes"][0]["call_gex"] is None
+
+
+def test_vanna_surface(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    requested: list[tuple[str, str]] = []
+
+    def get_chain(ticker: str, expiry: str) -> data_fetcher.ChainSnapshot:
+        requested.append((ticker, expiry))
+        return fake_snapshot(ticker, expiry)
+
+    monkeypatch.setattr(data_fetcher, "get_chain", get_chain)
+    response = client.get("/api/vanna-surface?ticker=spy&expiry=all")
+    assert response.status_code == 200
+    assert requested == [("SPY", "all")]  # the expiry parameter is read, not the 0dte default
+
+    payload = strict_json(response.get_data(as_text=True))
+    assert set(payload) == {"x", "y", "z"}
+    assert len(payload["x"]) == len(payload["y"]) == len(payload["z"]) == 20
+    assert all(len(row) == 20 for row in payload["z"])
+    assert payload["x"][0] == pytest.approx(540.0) and payload["x"][-1] == pytest.approx(660.0)
+    assert payload["y"][0] == pytest.approx(0.8) and payload["y"][-1] == pytest.approx(1.2)
+
+
+@pytest.mark.parametrize("query", ["ticker=TSLA&expiry=all", "ticker=SPY&expiry=weekly"])
+def test_vanna_surface_rejects_invalid_parameters(client: FlaskClient, query: str) -> None:
+    assert client.get(f"/api/vanna-surface?{query}").status_code == 400

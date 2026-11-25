@@ -14,6 +14,9 @@ Open-source dashboard that estimates **dealer positioning in options** for day t
   and total net GEX and net VEX (positive / negative regime).
 - Volatility strip: ATM implied volatility against 20-day realized volatility (ratio
   and spread), and the 1-day expected move, also drawn as two dashed lines on the chart.
+- On-demand **3D vanna surface** ("Analyze 3D Vanna Surface" button): net VEX over
+  simulated spots and IV shocks, computed only when asked so that the dashboard
+  itself stays fast.
 - Two expiry filters: **0DTE** (today's expiry, or the next one after the close, on
   weekends and holidays) and **All** (every expiry up to 45 days).
 - Data from **Alpaca** (free paper account) or **Massive** (formerly Polygon.io) when
@@ -124,6 +127,15 @@ Contracts are dropped if they have missing values, open interest ≤ 0, an IV ou
   returns of completed sessions (21 adjusted closes from Alpaca, or yfinance as a
   fallback, downloaded once per ticker and day).
 
+### Vanna surface
+
+Total net VEX of the cleaned chain on a 20 × 20 grid: simulated spots from −10 % to
++10 % around spot, and IV multipliers from ×0.80 to ×1.20. Every contract keeps its
+strike, `T` and open interest (sticky strike); its IV is scaled by the shock and the
+spot is replaced by the simulated one, with the same Vanna and VEX formulas as above.
+At the current spot and an unshocked IV, the surface equals the dashboard's net VEX.
+A full 45-day chain takes about 50 ms.
+
 ## Known limitations
 
 - **Open interest is published once a day** and reflects the previous close.
@@ -166,6 +178,9 @@ bounds, dividend yields, host and port...) lives in [`config.py`](config.py).
   `expected_move` ($), `expected_move_pct` (%), `expected_move_upper` and
   `expected_move_lower`. Returns `400` on invalid parameters and `502` if no data
   source is available.
+- `GET /api/vanna-surface?ticker=SPY&expiry=all` (`expiry` is `0dte` or `all`, as
+  for `/api/gex`): `{"x": spots, "y": IV multipliers, "z": net VEX}`, with one row of
+  `z` per IV multiplier. Same `400` / `502` errors as above.
 - `GET /api/health`: `{"status": "ok"}`.
 
 ## Tests

@@ -177,3 +177,30 @@ def test_expected_move() -> None:
     assert em["expected_move_upper"] == pytest.approx(SPOT + em["expected_move"])
     assert em["expected_move_lower"] == pytest.approx(SPOT - em["expected_move"])
     assert set(qe.expected_move(SPOT, None).values()) == {None}
+
+
+# --- Vanna surface ------------------------------------------------------------
+
+
+def test_vanna_surface_is_consistent_with_the_dashboard() -> None:
+    chain = make_chain([(95, "put", 300, 0.22), (100, "call", 500, 0.20), (100, "put", 200, 0.21), (105, "call", 400, 0.19)])
+    surface = qe.calculate_vanna_surface(chain, SPOT, resolution=21, ticker="SPY", now=NOW)
+    z = np.array(surface["z"])
+    assert z.shape == (21, 21)
+    assert surface["x"][0] == pytest.approx(90.0) and surface["x"][-1] == pytest.approx(110.0)
+    assert surface["y"][0] == pytest.approx(0.8) and surface["y"][-1] == pytest.approx(1.2)
+
+    # Centre of the grid (current spot, unshocked IV): the dashboard's total net VEX.
+    assert z[10, 10] == pytest.approx(qe.build_report(chain, SPOT, "SPY", "all", NOW)["totals"]["net_vex"])
+    # One row per IV shock, one column per spot: corner = IV x0.8 at spot +10 %.
+    shocked = chain.assign(implied_volatility=chain["implied_volatility"] * 0.8)
+    assert z[0, -1] == pytest.approx(qe.compute_exposures(shocked, 110.0, "SPY", NOW)["vex"].sum())
+
+    calls = qe.calculate_vanna_surface(chain, SPOT, "call", 21, ticker="SPY", now=NOW)["z"]
+    puts = qe.calculate_vanna_surface(chain, SPOT, "put", 21, ticker="SPY", now=NOW)["z"]
+    np.testing.assert_allclose(np.array(calls) + np.array(puts), z)
+
+
+def test_vanna_surface_rejects_an_unknown_option_type() -> None:
+    with pytest.raises(ValueError):
+        qe.calculate_vanna_surface(make_chain([(100, "call", 10, 0.2)]), SPOT, "straddle", ticker="SPY", now=NOW)

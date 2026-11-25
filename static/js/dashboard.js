@@ -12,6 +12,9 @@ const COLORS = {
   grid: "#1c2027",
   text: "#9ca3af",
 };
+// ColorBrewer RdYlGn (plotly.js has no such named scale): red for negative VEX, green for positive.
+const RDYLGN = ["#a50026", "#d73027", "#f46d43", "#fdae61", "#fee08b", "#ffffbf", "#d9ef8b", "#a6d96a", "#66bd63", "#1a9850", "#006837"]
+  .map((color, i, all) => [i / (all.length - 1), color]);
 
 const state = {
   ticker: document.querySelector("#ticker-group button")?.dataset.ticker || "SPY",
@@ -20,6 +23,7 @@ const state = {
   data: null,
 };
 let requestSeq = 0;
+let vannaSeq = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -267,11 +271,88 @@ async function load() {
   }
 }
 
+function hideVannaSurface() {
+  vannaSeq++; // drops a surface still being computed for the previous selection
+  $("vanna-3d-container").hidden = true;
+  $("vanna-3d-btn").setAttribute("aria-expanded", "false");
+  Plotly.purge("vanna-3d");
+}
+
+function renderVannaSurface(surface) {
+  const small = window.innerWidth < 768;
+  const axis = (title, extra = {}) => ({
+    title: { text: title },
+    color: COLORS.text,
+    gridcolor: "#374151",
+    zerolinecolor: "#4b5563",
+    backgroundcolor: "rgba(0,0,0,0)",
+    ...extra,
+  });
+  const trace = {
+    type: "surface",
+    x: surface.x,
+    y: surface.y,
+    z: surface.z,
+    text: surface.z.map((row) => row.map(fmtMoney)),
+    colorscale: RDYLGN,
+    cmid: 0,
+    // Phones: horizontal bar under the scene, to keep the width for it. Desktop: below the toolbar.
+    colorbar: small
+      ? { orientation: "h", x: 0.5, xanchor: "center", y: 0, yanchor: "bottom", len: 0.9, thickness: 10, exponentformat: "B" }
+      : { len: 0.6, y: 0.38, thickness: 12, exponentformat: "B" },
+    hovertemplate: "Spot %{x:.2f}<br>IV ×%{y:.2f}<br>Net VEX %{text}<extra></extra>",
+  };
+  const layout = {
+    paper_bgcolor: "rgba(0,0,0,0)",
+    font: { color: COLORS.text, size: 11, family: "ui-monospace, SFMono-Regular, Menlo, monospace" },
+    margin: { l: 0, r: 0, t: 0, b: 0 },
+    scene: {
+      domain: small ? { x: [0, 1], y: [0.14, 1] } : { x: [0, 1], y: [0, 1] },
+      xaxis: axis("Spot Price"),
+      yaxis: axis("IV Shock", { tickformat: ".2f" }),
+      zaxis: axis("Net VEX", { exponentformat: "B" }),
+      // A narrow screen sees less of the scene: the camera steps back so it fits the width.
+      camera: { eye: small ? { x: 2.1, y: -2.3, z: 1.2 } : { x: 1.5, y: -1.6, z: 0.8 } },
+    },
+  };
+  Plotly.react("vanna-3d", [trace], layout, {
+    responsive: true,
+    displaylogo: false,
+    displayModeBar: small ? false : "hover", // on phones the toolbar covers the plot
+  });
+}
+
+async function loadVannaSurface() {
+  const seq = ++vannaSeq;
+  const { ticker, expiry } = state;
+  $("vanna-3d-container").hidden = false;
+  $("vanna-3d-btn").setAttribute("aria-expanded", "true");
+  $("vanna-3d-title").textContent = `Net VEX surface · ${ticker} ${expiry === "all" ? "All" : "0DTE"}`;
+  $("vanna-3d-error").hidden = true;
+  $("vanna-3d-loading").style.display = "inline-flex";
+  try {
+    const params = new URLSearchParams({ ticker, expiry });
+    const response = await fetch(`/api/vanna-surface?${params}`);
+    const body = await response.json().catch(() => ({}));
+    if (seq !== vannaSeq) return; // a newer request or a selection change superseded this one
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    renderVannaSurface(body);
+  } catch (error) {
+    if (seq !== vannaSeq) return;
+    Plotly.purge("vanna-3d");
+    $("vanna-3d-error").textContent = error.message || "Request failed";
+    $("vanna-3d-error").hidden = false;
+  } finally {
+    if (seq === vannaSeq) $("vanna-3d-loading").style.display = "none";
+  }
+}
+
 $("ticker-group").addEventListener("click", (event) => {
   const button = event.target.closest("button");
   if (!button) return;
   state.ticker = button.dataset.ticker;
   setPressed("ticker-group", "ticker", state.ticker);
+  hideVannaSurface(); // never show a surface computed for another selection
   load();
 });
 
@@ -280,8 +361,11 @@ $("expiry-group").addEventListener("click", (event) => {
   if (!button) return;
   state.expiry = button.dataset.expiry;
   setPressed("expiry-group", "expiry", state.expiry);
+  hideVannaSurface();
   load();
 });
+
+$("vanna-3d-btn").addEventListener("click", loadVannaSurface);
 
 $("metric-group").addEventListener("click", (event) => {
   const button = event.target.closest("button");

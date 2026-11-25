@@ -293,3 +293,45 @@ def expected_move(spot: float, iv: float | None) -> dict[str, float | None]:
         "expected_move_upper": spot + move,
         "expected_move_lower": spot - move,
     }
+
+
+# --- Vanna surface ------------------------------------------------------------
+
+
+def calculate_vanna_surface(
+    chain_df: pd.DataFrame,
+    current_spot: float,
+    option_type: str = "All",
+    resolution: int = 20,
+    *,
+    ticker: str,
+    now: datetime,
+) -> dict[str, list[Any]]:
+    """Net VEX of the cleaned chain over simulated spots and IV shocks.
+
+    Spots span ``current_spot +/- VANNA_SURFACE_SPOT_PCT`` and IV multipliers span
+    ``VANNA_SURFACE_IV_SHOCK``, ``resolution`` points each. Every contract keeps its strike, T and
+    open interest (sticky strike); its IV is scaled by the shock and the spot replaced by the simulated
+    one. ``option_type`` is ``All``, ``call`` or ``put``. Returns ``{"x": spots, "y": IV multipliers,
+    "z": Net VEX}``, with one row of ``z`` per IV multiplier (the layout of a Plotly surface).
+    """
+    kind = option_type.lower()
+    if kind not in ("all", "call", "put"):
+        raise ValueError(f"option_type must be All, call or put, not {option_type!r}")
+    chain = clean_chain(chain_df, current_spot, now)
+    if kind != "all":
+        chain = chain[chain["option_type"] == kind]
+    strike, t, sigma, weight, r, q = _contract_inputs(chain, ticker, now)
+
+    pct = config.VANNA_SURFACE_SPOT_PCT
+    spots = np.linspace(current_spot * (1 - pct), current_spot * (1 + pct), resolution)
+    shocks = np.linspace(*config.VANNA_SURFACE_IV_SHOCK, resolution)
+    spot_grid, shock_grid = np.meshgrid(spots, shocks)  # shape (len(shocks), len(spots))
+    s, m = spot_grid.ravel(), shock_grid.ravel()
+    total = np.zeros(s.size)
+    for start in range(0, strike.size, config.ZERO_GAMMA_CHUNK_SIZE):  # contracts x grid points, in blocks
+        block = slice(start, start + config.ZERO_GAMMA_CHUNK_SIZE)
+        vanna = bs_vanna(s[None, :], strike[block, None], t[block, None], sigma[block, None] * m[None, :], r, q)
+        total += weight[block] @ vanna
+    z = total * s * config.VOL_POINT  # same VEX as compute_exposures, at the simulated spot
+    return {"x": spots.tolist(), "y": shocks.tolist(), "z": z.reshape(spot_grid.shape).tolist()}

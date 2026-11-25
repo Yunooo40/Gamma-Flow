@@ -96,6 +96,27 @@ def gex() -> Response:
     )
 
 
+@app.get("/api/vanna-surface")
+def vanna_surface() -> Response:
+    """Net VEX over simulated spots and IV shocks, computed on demand from the cached chain."""
+    ticker = request.args.get("ticker", "").strip().upper()
+    expiry = request.args.get("expiry", "0dte").strip().lower()
+    if ticker not in config.TICKERS:
+        return _json_response({"error": f"Invalid ticker, expected one of: {', '.join(config.TICKERS)}"}, 400)
+    if expiry not in config.EXPIRY_FILTERS:
+        return _json_response({"error": f"Invalid expiry, expected one of: {', '.join(config.EXPIRY_FILTERS)}"}, 400)
+
+    try:
+        snapshot = data_fetcher.get_chain(ticker, expiry)
+    except data_fetcher.DataUnavailableError:
+        return _json_response({"error": "Market data unavailable"}, 502)
+
+    surface = quant_engine.calculate_vanna_surface(
+        snapshot.chain, snapshot.spot, ticker=ticker, now=datetime.now(timezone.utc)
+    )
+    return _json_response(surface)
+
+
 @app.errorhandler(500)
 def internal_error(_error: Exception) -> Response:
     # The traceback goes to the server log only, never to the client.
