@@ -12,6 +12,8 @@ Open-source dashboard that estimates **dealer positioning in options** for day t
   Zero Gamma, Call Wall and Put Wall lines.
 - KPI cards: spot, Zero Gamma, Call Wall, Put Wall (each with its distance to spot)
   and total net GEX and net VEX (positive / negative regime).
+- Volatility strip: ATM implied volatility against 20-day realized volatility (ratio
+  and spread), and the 1-day expected move, also drawn as two dashed lines on the chart.
 - Two expiry filters: **0DTE** (today's expiry, or the next one after the close, on
   weekends and holidays) and **All** (every expiry up to 45 days).
 - Data from **Alpaca** (free paper account) or **Massive** (formerly Polygon.io) when
@@ -107,6 +109,21 @@ displayed range:
 Contracts are dropped if they have missing values, open interest ≤ 0, an IV outside
 [1 %, 300 %], a strike outside spot ± 30 %, or have already expired.
 
+### Volatility and expected move
+
+- **ATM IV:** mean of the call and put IV at the strike closest to spot, on the
+  shortest expiry of the cleaned chain. Chain IVs are calendar-time (`T` to the
+  16:00 close, 365-day basis). On a 0DTE that reads about 2.3× a session-based IV,
+  because the option prices a whole session in a few calendar hours. The option's
+  total variance `σ²·T` is therefore spread over the trading sessions left until
+  the expiry (the rest of today's session plus each later weekday):
+  `IV_ATM = σ · √(T · 252 / sessions)`.
+- **Expected move (1 day):** `EM = S · IV_ATM · √(1/252)`, shown as `±$EM` and as the
+  bounds `S ± EM`.
+- **Realized volatility (20 days):** `std(log returns) · √252` over the last 20 daily
+  returns of completed sessions (21 adjusted closes from Alpaca, or yfinance as a
+  fallback, downloaded once per ticker and day).
+
 ## Known limitations
 
 - **Open interest is published once a day** and reflects the previous close.
@@ -121,6 +138,9 @@ Contracts are dropped if they have missing values, open interest ≤ 0, an IV ou
   UI says so. Use the dashboard during the session.
 - yfinance data is unofficial and delayed; Massive data may be delayed depending
   on your plan.
+- The session count behind the ATM IV ignores exchange holidays and half days. This
+  only matters when the shortest expiry spans a holiday, which for daily expiries
+  happens outside the session.
 
 ## Configuration
 
@@ -142,8 +162,10 @@ bounds, dividend yields, host and port...) lives in [`config.py`](config.py).
 ### API
 
 - `GET /api/gex?ticker=SPY&expiry=0dte` (`expiry` is `0dte` or `all`): exposures,
-  levels and metadata as JSON. Returns `400` on invalid parameters and `502` if no
-  data source is available.
+  levels and metadata as JSON, plus `atm_iv`, `realized_vol` (decimals),
+  `expected_move` ($), `expected_move_pct` (%), `expected_move_upper` and
+  `expected_move_lower`. Returns `400` on invalid parameters and `502` if no data
+  source is available.
 - `GET /api/health`: `{"status": "ok"}`.
 
 ## Tests

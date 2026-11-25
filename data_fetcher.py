@@ -6,6 +6,7 @@ chain schema (``quant_engine.CHAIN_COLUMNS``) and cached on disk as JSON.
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import logging
@@ -16,7 +17,7 @@ import tempfile
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -527,14 +528,63 @@ def _load_cache(ticker: str, expiry_filter: str, now: datetime) -> ChainSnapshot
         return None
 
 
+# --- Realized volatility ------------------------------------------------------
+
+
+def _alpaca_closes(ticker: str, today: date) -> pd.Series:
+    """Adjusted daily closes (consolidated SIP feed) of the sessions before ``today``, indexed by date."""
+    # Ending at midnight keeps today's unfinished bar out, and the free plan serves SIP data older than 15 min.
+    midnight = datetime.combine(today, time(0), tzinfo=config.MARKET_TZ)
+    params = {
+        "timeframe": "1Day",
+        "start": (today - timedelta(days=60)).isoformat(),
+        "end": midnight.isoformat(),
+        "adjustment": "all",
+        "feed": "sip",
+        "limit": 1000,
+    }
+    with requests.Session() as session:
+        session.headers.update({"APCA-API-KEY-ID": config.ALPACA_KEY, "APCA-API-SECRET-KEY": config.ALPACA_SECRET})
+        bars = list(_alpaca_pages(session, f"{config.ALPACA_DATA_URL}/v2/stocks/{ticker}/bars", params, "bars"))
+    dates = pd.to_datetime([bar["t"] for bar in bars], utc=True).tz_convert(config.MARKET_TZ).date
+    return pd.Series([bar["c"] for bar in bars], index=dates, dtype=float)
+
+
+def _yfinance_closes(ticker: str, today: date) -> pd.Series:
+    """Adjusted daily closes from yfinance, indexed by session date (today's partial bar included)."""
+    history = yf.Ticker(ticker).history(period="3mo", interval="1d", auto_adjust=True)
+    return pd.Series(history["Close"].to_numpy(dtype=float), index=history.index.date)
+
+
+@functools.lru_cache(maxsize=32)
+def _daily_closes(ticker: str, today: date) -> tuple[float, ...]:
+    """The last ``RV_WINDOW + 1`` closes of completed sessions: one download per ticker and day.
+
+    Alpaca first (when keys are set), then yfinance. Raises ``_SourceError`` when no source has
+    enough history; a failure is not cached, so the next request tries again.
+    """
+    sources = [_alpaca_closes] if config.ALPACA_KEY and config.ALPACA_SECRET else []
+    errors: list[str] = []
+    for fetch in [*sources, _yfinance_closes]:
+        try:
+            closes = fetch(ticker, today).dropna()
+            closes = closes[[day < today for day in closes.index]].tail(config.RV_WINDOW + 1)
+            if len(closes) == config.RV_WINDOW + 1 and (closes > 0).all():
+                return tuple(closes)
+            errors.append(f"{fetch.__name__}: {len(closes)} valid closes")
+        except Exception as exc:  # any source failure falls through to the next one
+            errors.append(f"{fetch.__name__}: {exc}")
+    raise _SourceError("; ".join(errors))
+
+
 # --- Public API ---------------------------------------------------------------
 
 
 def get_chain(ticker: str, expiry_filter: str, now: datetime | None = None) -> ChainSnapshot:
     """Normalized option chain for a whitelisted ticker and expiry filter.
 
-    Served from the disk cache when fresh, otherwise downloaded (Massive, then
-    yfinance). Raises ``DataUnavailableError`` if every source fails.
+    Served from the disk cache when fresh, otherwise downloaded (Alpaca, then
+    Massive, then yfinance). Raises ``DataUnavailableError`` if every source fails.
     """
     ticker = ticker.upper()
     if ticker not in config.TICKERS or expiry_filter not in config.EXPIRY_FILTERS:
@@ -549,3 +599,17 @@ def get_chain(ticker: str, expiry_filter: str, now: datetime | None = None) -> C
             snapshot = _fetch(ticker, expiry_filter, now)
             _save_cache(snapshot, expiry_filter)
         return snapshot
+
+
+def get_realized_vol(ticker: str, now: datetime | None = None) -> float | None:
+    """Annualized realized volatility: ``std(log_returns) * sqrt(252)`` over the last ``RV_WINDOW`` sessions.
+
+    ``None`` (and a logged warning) when no source has the daily history.
+    """
+    now = now if now is not None else datetime.now(timezone.utc)
+    try:
+        closes = _daily_closes(ticker.upper(), now.astimezone(config.MARKET_TZ).date())
+    except _SourceError as exc:
+        logger.warning("Realized volatility unavailable for %s: %s", ticker, exc)
+        return None
+    return float(np.std(np.diff(np.log(closes)), ddof=1) * np.sqrt(config.TRADING_DAYS_PER_YEAR))

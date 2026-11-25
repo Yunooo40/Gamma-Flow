@@ -63,9 +63,12 @@ def gex() -> Response:
         return _json_response({"error": "Market data unavailable"}, 502)
 
     report = quant_engine.build_report(snapshot.chain, snapshot.spot, ticker, expiry, datetime.now(timezone.utc))
+    realized_vol = data_fetcher.get_realized_vol(ticker)
     warnings = list(snapshot.warnings)
     if not report["strikes"]:
         warnings.append("No contract with valid open interest and IV in the displayed range")
+    if realized_vol is None:
+        warnings.append("Realized volatility unavailable (no daily history)")
 
     return _json_response(
         {
@@ -82,6 +85,12 @@ def gex() -> Response:
             "totals": report["totals"],
             "display_range": report["display_range"],
             "strikes": report["strikes"],
+            "atm_iv": report["atm_iv"],
+            "realized_vol": realized_vol,
+            "expected_move": report["expected_move"],
+            "expected_move_pct": report["expected_move_pct"],
+            "expected_move_upper": report["expected_move_upper"],
+            "expected_move_lower": report["expected_move_lower"],
             "warnings": warnings,
         }
     )

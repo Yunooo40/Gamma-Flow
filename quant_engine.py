@@ -9,7 +9,7 @@ the open interest, so calls contribute positive and puts negative exposure.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -225,6 +225,7 @@ def build_report(
         config.ZERO_GAMMA_GRID_POINTS,
     )
     zero_gamma = find_zero_gamma(grid, gex_profile(clean, grid, ticker, now), spot)
+    iv = atm_iv(clean, spot, now)
 
     half_width = config.DISPLAY_RANGE_PCT[expiry_filter]
     low, high = spot * (1 - half_width), spot * (1 + half_width)
@@ -238,4 +239,57 @@ def build_report(
         },
         "display_range": {"min": float(low), "max": float(high)},
         "strikes": shown.to_dict(orient="records"),
+        "atm_iv": iv,
+        **expected_move(spot, iv),
+    }
+
+
+# --- Volatility analysis ------------------------------------------------------
+
+
+def sessions_to_expiry(expiration: date, now: datetime) -> float:
+    """Trading sessions left until the expiry close: the rest of today's session plus each later weekday.
+
+    Floored like ``time_to_expiry``, at ``MIN_T_MINUTES`` of a session.
+    shortcut: exchange holidays count as sessions and half days as full ones; add a holiday calendar
+    if an expiry spanning a holiday matters (for daily expiries, only outside the session).
+    """
+    local = now.astimezone(config.MARKET_TZ)
+    today = local.date()
+    open_ = datetime.combine(today, config.MARKET_OPEN, tzinfo=config.MARKET_TZ)
+    close = datetime.combine(today, config.MARKET_CLOSE, tzinfo=config.MARKET_TZ)
+    session = (close - open_).total_seconds()
+    left_today = (close - max(local, open_)).total_seconds() if np.is_busday(today) else 0.0
+    today_part = min(max(left_today, 0.0) / session, 1.0)
+    later = int(np.busday_count(today + timedelta(days=1), expiration + timedelta(days=1)))
+    return max(today_part + later, config.MIN_T_MINUTES * 60 / session)
+
+
+def atm_iv(chain: pd.DataFrame, spot: float, now: datetime) -> float | None:
+    """Mean call/put IV at the strike closest to spot on the shortest expiry, on a 252-session basis.
+
+    Chain IVs are calendar-time (T to the 16:00 close, 365-day basis): on a 0DTE they read ~2.3x a
+    session-based IV, because the option prices a whole session in a few calendar hours. The option's
+    total variance sigma^2 * T is therefore spread over the trading sessions left instead.
+    """
+    if chain.empty:
+        return None
+    expiry = chain["expiration"].min()
+    nearest = chain[chain["expiration"] == expiry]
+    strike = nearest["strike"].iloc[(nearest["strike"] - spot).abs().argmin()]
+    iv = nearest.loc[nearest["strike"] == strike, "implied_volatility"].mean()
+    t = time_to_expiry(pd.Series([expiry]), now)[0]
+    return float(iv * np.sqrt(t * config.TRADING_DAYS_PER_YEAR / sessions_to_expiry(expiry, now)))
+
+
+def expected_move(spot: float, iv: float | None) -> dict[str, float | None]:
+    """1-day expected move ``spot * iv * sqrt(1 / 252)``: in dollars, in percent and as bounds around spot."""
+    if iv is None:
+        return dict.fromkeys(("expected_move", "expected_move_pct", "expected_move_upper", "expected_move_lower"))
+    move = float(spot * iv * np.sqrt(1 / config.TRADING_DAYS_PER_YEAR))
+    return {
+        "expected_move": move,
+        "expected_move_pct": move / spot * 100,
+        "expected_move_upper": spot + move,
+        "expected_move_lower": spot - move,
     }

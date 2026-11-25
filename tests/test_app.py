@@ -53,6 +53,12 @@ def client() -> FlaskClient:
     return app_module.app.test_client()
 
 
+@pytest.fixture(autouse=True)
+def fixed_realized_vol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The daily history must never be downloaded during tests."""
+    monkeypatch.setattr(data_fetcher, "get_realized_vol", lambda ticker: 0.12)
+
+
 def test_health(client: FlaskClient) -> None:
     assert client.get("/api/health").get_json() == {"status": "ok"}
 
@@ -84,6 +90,19 @@ def test_gex_payload(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> No
     assert payload["levels"]["call_wall"] == 605.0 and payload["levels"]["put_wall"] == 590.0
     assert payload["fetched_at"].endswith("Z")
     assert payload["strikes"] and set(payload["strikes"][0]) == {"strike", "call_gex", "put_gex", "net_gex", "net_vex"}
+    assert payload["realized_vol"] == 0.12 and payload["atm_iv"] > 0
+    move = payload["expected_move"]
+    assert payload["expected_move_upper"] == pytest.approx(600.0 + move)
+    assert payload["expected_move_lower"] == pytest.approx(600.0 - move)
+    assert payload["expected_move_pct"] == pytest.approx(move / 600.0 * 100)
+
+
+def test_missing_realized_vol_is_flagged(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(data_fetcher, "get_chain", fake_snapshot)
+    monkeypatch.setattr(data_fetcher, "get_realized_vol", lambda ticker: None)
+    payload = strict_json(client.get("/api/gex?ticker=SPY&expiry=all").get_data(as_text=True))
+    assert payload["realized_vol"] is None
+    assert "Realized volatility unavailable (no daily history)" in payload["warnings"]
 
 
 def test_nan_and_infinity_become_null(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,9 +116,15 @@ def test_nan_and_infinity_become_null(client: FlaskClient, monkeypatch: pytest.M
             "totals": {"net_gex": float("inf"), "net_vex": float("-inf")},
             "display_range": {"min": 540.0, "max": 660.0},
             "strikes": [{"strike": 600.0, "call_gex": float("nan"), "put_gex": 0.0, "net_gex": 0.0, "net_vex": 0.0}],
+            "atm_iv": float("nan"),
+            "expected_move": float("inf"),
+            "expected_move_pct": None,
+            "expected_move_upper": None,
+            "expected_move_lower": None,
         },
     )
     payload = strict_json(client.get("/api/gex?ticker=SPY&expiry=0dte").get_data(as_text=True))
+    assert payload["atm_iv"] is None and payload["expected_move"] is None
     assert payload["levels"]["call_wall"] is None
     assert payload["totals"] == {"net_gex": None, "net_vex": None}
     assert payload["strikes"][0]["call_gex"] is None

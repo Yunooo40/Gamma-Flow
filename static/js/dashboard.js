@@ -8,6 +8,7 @@ const COLORS = {
   negative: "#ef4444",
   spot: "#e5e7eb",
   zeroGamma: "#c4b5fd",
+  expectedMove: "#67e8f9",
   grid: "#1c2027",
   text: "#9ca3af",
 };
@@ -34,6 +35,10 @@ function fmtMoney(value) {
 
 function fmtPrice(value) {
   return value == null || !Number.isFinite(value) ? "–" : value.toFixed(2);
+}
+
+function fmtPct(value) {
+  return value == null || !Number.isFinite(value) ? "–" : `${(value * 100).toFixed(1)}%`;
 }
 
 function fmtDistance(level, spot) {
@@ -110,6 +115,22 @@ function renderKpis(d) {
   setTotal("vex", d.totals.net_vex, "vanna");
 }
 
+function renderVolatility(d) {
+  const iv = d.atm_iv;
+  const rv = d.realized_vol;
+  $("vol-iv").textContent = fmtPct(iv);
+  $("vol-rv").textContent = fmtPct(rv);
+  const spread = iv - rv;
+  $("vol-ratio").textContent =
+    iv == null || rv == null || !(rv > 0)
+      ? "–"
+      : `×${(iv / rv).toFixed(2)} (${spread >= 0 ? "+" : ""}${(spread * 100).toFixed(1)} pts)`;
+  $("vol-em").textContent =
+    d.expected_move == null
+      ? "–"
+      : `±$${d.expected_move.toFixed(2)} (${fmtPrice(d.expected_move_lower)} – ${fmtPrice(d.expected_move_upper)})`;
+}
+
 function levelLines(d) {
   const { min, max } = d.display_range;
   return [
@@ -117,6 +138,9 @@ function levelLines(d) {
     { y: d.levels.zero_gamma, label: "Zero Gamma", color: COLORS.zeroGamma, dash: "dot", width: 1.5 },
     { y: d.levels.call_wall, label: "Call Wall", color: COLORS.positive, dash: "solid", width: 1 },
     { y: d.levels.put_wall, label: "Put Wall", color: COLORS.negative, dash: "solid", width: 1 },
+    // Labelled on the left: the move often lands near a wall or Zero Gamma, labelled on the right.
+    { y: d.expected_move_upper, label: "EM high", color: COLORS.expectedMove, dash: "dash", width: 1, left: true },
+    { y: d.expected_move_lower, label: "EM low", color: COLORS.expectedMove, dash: "dash", width: 1, left: true },
   ].filter((line) => line.y != null && line.y >= min && line.y <= max);
 }
 
@@ -179,8 +203,8 @@ function renderChart() {
     })),
     annotations: lines.map((line) => ({
       xref: "paper",
-      x: 0.98,
-      xanchor: "right",
+      x: line.left ? 0.02 : 0.98,
+      xanchor: line.left ? "left" : "right",
       yref: "y",
       y: line.y,
       yanchor: "bottom",
@@ -202,12 +226,15 @@ function render() {
   const d = state.data;
   renderHeader(d);
   renderKpis(d);
+  renderVolatility(d);
   renderChart();
 }
 
 function clearDisplay() {
   state.data = null;
-  for (const id of ["kpi-spot", "kpi-zg", "kpi-cw", "kpi-pw", "kpi-gex", "kpi-vex"]) $(id).textContent = "–";
+  for (const id of ["kpi-spot", "kpi-zg", "kpi-cw", "kpi-pw", "kpi-gex", "kpi-vex", "vol-iv", "vol-rv", "vol-ratio", "vol-em"]) {
+    $(id).textContent = "–";
+  }
   for (const id of ["kpi-spot-sub", "kpi-zg-sub", "kpi-cw-sub", "kpi-pw-sub", "kpi-gex-sub", "kpi-vex-sub"]) {
     $(id).textContent = "";
   }

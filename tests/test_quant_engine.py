@@ -53,6 +53,7 @@ def test_expiry_in_one_minute_stays_finite() -> None:
 
     report = qe.build_report(chain, SPOT, "SPY", "0dte", now)
     values = [*report["totals"].values(), *(v for row in report["strikes"] for v in row.values())]
+    values += [report[key] for key in ("atm_iv", "expected_move", "expected_move_upper", "expected_move_lower")]
     assert report["strikes"] and all(math.isfinite(v) for v in values)
 
 
@@ -133,3 +134,46 @@ def test_calculate_iv_inverts_bs_price(option_type: str, strike: float) -> None:
 )
 def test_calculate_iv_returns_nan_when_unsolvable(price: float, strike: float, option_type: str) -> None:
     assert math.isnan(qe.calculate_iv(price, SPOT, strike, 30 / 365, 0.04, option_type))
+
+
+# --- Volatility analysis ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("expiration", "now", "expected"),
+    [
+        (date(2026, 11, 23), datetime(2026, 11, 23, 10, 0, tzinfo=NY), 6 / 6.5),  # 0DTE during the session
+        (date(2026, 11, 23), datetime(2026, 11, 23, 8, 0, tzinfo=NY), 1.0),  # 0DTE before the open
+        (date(2026, 11, 24), datetime(2026, 11, 23, 17, 0, tzinfo=NY), 1.0),  # next day, after the close
+        (date(2026, 11, 30), datetime(2026, 11, 28, 12, 0, tzinfo=NY), 1.0),  # Saturday to Monday
+        (date(2026, 12, 4), datetime(2026, 11, 30, 10, 0, tzinfo=NY), 6 / 6.5 + 4),  # Monday to Friday
+        (date(2026, 11, 23), datetime(2026, 11, 23, 15, 58, tzinfo=NY), 15 / 390),  # floored at 15 minutes
+    ],
+)
+def test_sessions_to_expiry(expiration: date, now: datetime, expected: float) -> None:
+    assert qe.sessions_to_expiry(expiration, now) == pytest.approx(expected)
+
+
+def test_atm_iv_uses_the_nearest_strike_of_the_shortest_expiry_on_a_session_basis() -> None:
+    today = date(2026, 11, 23)  # NOW is Monday 10:00 New York
+    chain = pd.concat(
+        [
+            make_chain([(99, "call", 10, 0.9), (100, "call", 10, 0.30), (100, "put", 10, 0.34)], expiration=today),
+            make_chain([(100, "call", 10, 0.5), (100, "put", 10, 0.5)], expiration=date(2026, 11, 27)),
+        ],
+        ignore_index=True,
+    )
+    t = qe.time_to_expiry(pd.Series([today]), NOW)[0]
+    expected = 0.32 * math.sqrt(t * config.TRADING_DAYS_PER_YEAR / (6 / 6.5))  # mean of 0.30 and 0.34
+    assert qe.atm_iv(chain, 100.2, NOW) == pytest.approx(expected)
+    assert expected == pytest.approx(0.32 / 2.31, rel=0.01)  # a 0DTE calendar IV reads ~2.3x a session IV
+    assert qe.atm_iv(chain.iloc[0:0], 100.0, NOW) is None
+
+
+def test_expected_move() -> None:
+    em = qe.expected_move(SPOT, 0.16)
+    assert em["expected_move"] == pytest.approx(SPOT * 0.16 * math.sqrt(1 / 252))
+    assert em["expected_move_pct"] == pytest.approx(em["expected_move"] / SPOT * 100)
+    assert em["expected_move_upper"] == pytest.approx(SPOT + em["expected_move"])
+    assert em["expected_move_lower"] == pytest.approx(SPOT - em["expected_move"])
+    assert set(qe.expected_move(SPOT, None).values()) == {None}

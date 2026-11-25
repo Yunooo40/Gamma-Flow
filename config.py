@@ -41,12 +41,15 @@ IV_MIN: float = 0.01
 IV_MAX: float = 3.0
 MIN_T_MINUTES: int = 15
 DAYS_PER_YEAR: int = 365
+TRADING_DAYS_PER_YEAR: int = 252  # basis of the expected move and of realized volatility
+RV_WINDOW: int = 20  # daily log returns used for realized volatility
 CONTRACT_MULTIPLIER: int = 100
 SPOT_MOVE_PCT: float = 0.01  # GEX is expressed per 1 % move of the underlying
 VOL_POINT: float = 0.01  # VEX is expressed per 1 volatility point
 
 # --- Market calendar ----------------------------------------------------------
 MARKET_TZ: ZoneInfo = ZoneInfo("America/New_York")
+MARKET_OPEN: time = time(9, 30)
 MARKET_CLOSE: time = time(16, 0)
 
 # --- Data sources -------------------------------------------------------------
