@@ -29,9 +29,23 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     monkeypatch.setattr(config, "ALPACA_KEY", "")  # real keys from .env must never reach the network
     monkeypatch.setattr(config, "ALPACA_SECRET", "")
     monkeypatch.setattr(config, "MASSIVE_BASE_URL", BASE_URL)
+    data_fetcher._daily_closes.cache_clear()  # the daily-closes cache outlives a test
 
 
 # --- Fakes --------------------------------------------------------------------
+
+
+def alternating_closes(n: int) -> list[float]:
+    """``n`` closes whose daily log returns alternate +1 % / -1 %."""
+    returns = [0.0] + [0.01 if i % 2 == 0 else -0.01 for i in range(n - 1)]
+    return [100 * math.exp(sum(returns[: i + 1])) for i in range(n)]
+
+
+# Sample std of 20 returns of +/-1 %, annualized: the RV of ``alternating_closes(21)``.
+RV_ALTERNATING = 0.01 * math.sqrt(20 / 19) * math.sqrt(252)
+# 30 sessions before Monday: 9 outliers outside the 20-return window, then the window itself.
+PAST_SESSIONS = pd.bdate_range(end=MONDAY - timedelta(days=1), periods=30)
+PAST_CLOSES = [50.0] * 9 + alternating_closes(21)
 
 
 def massive_contract(strike: float, kind: str, expiration: date, oi: int, iv: float | None) -> dict[str, Any]:
@@ -105,6 +119,11 @@ class FakeYfTicker:
             "impliedVolatility": [0.2, 0.18],
         }
         return SimpleNamespace(calls=pd.DataFrame(side), puts=pd.DataFrame(side))
+
+    def history(self, period: str, interval: str, auto_adjust: bool = True) -> pd.DataFrame:
+        """Daily bars at midnight New York, ending with today's unfinished bar (an outlier)."""
+        index = pd.DatetimeIndex([*PAST_SESSIONS, pd.Timestamp(MONDAY)]).tz_localize(NY)
+        return pd.DataFrame({"Close": [*PAST_CLOSES, 999.0]}, index=index)
 
 
 @pytest.fixture
@@ -253,3 +272,39 @@ def test_alpaca_solves_iv_from_option_prices(
     assert iv[600.0] == pytest.approx(0.15, rel=1e-6) and iv[595.0] == pytest.approx(0.17, rel=1e-6)
     assert math.isnan(iv[650.0])
     assert tuple(snap.chain.columns) == CHAIN_COLUMNS
+
+
+# --- Realized volatility ------------------------------------------------------
+
+
+def test_realized_vol_from_alpaca_daily_bars(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "ALPACA_KEY", "k")
+    monkeypatch.setattr(config, "ALPACA_SECRET", "s")
+    bars = [{"t": f"{day.date().isoformat()}T05:00:00Z", "c": close} for day, close in zip(PAST_SESSIONS, PAST_CLOSES)]
+    bars.append({"t": f"{MONDAY.isoformat()}T05:00:00Z", "c": 999.0})  # today's unfinished bar is ignored
+    calls = install_massive(monkeypatch, [FakeResponse(200, {"bars": bars, "next_page_token": None})])
+
+    assert data_fetcher.get_realized_vol("SPY", MONDAY_MORNING) == pytest.approx(RV_ALTERNATING)
+    params = calls[0]["params"]
+    assert calls[0]["url"].endswith("/v2/stocks/SPY/bars") and calls[0]["headers"]["APCA-API-KEY-ID"] == "k"
+    assert params["feed"] == "sip" and params["adjustment"] == "all" and params["timeframe"] == "1Day"
+    assert params["end"] == "2026-11-23T00:00:00-05:00"  # midnight New York: today's bar is left out
+
+    data_fetcher.get_realized_vol("SPY", MONDAY_MORNING)
+    assert len(calls) == 1  # one download per ticker and day
+
+
+def test_realized_vol_falls_back_to_yfinance(
+    monkeypatch: pytest.MonkeyPatch, fake_yfinance: type[FakeYfTicker]
+) -> None:
+    monkeypatch.setattr(config, "ALPACA_KEY", "k")
+    monkeypatch.setattr(config, "ALPACA_SECRET", "s")
+    install_massive(monkeypatch, [FakeResponse(403, {"message": "forbidden"})])
+    assert data_fetcher.get_realized_vol("QQQ", MONDAY_MORNING) == pytest.approx(RV_ALTERNATING)
+
+
+def test_realized_vol_is_none_without_history(
+    monkeypatch: pytest.MonkeyPatch, fake_yfinance: type[FakeYfTicker]
+) -> None:
+    monkeypatch.setattr(FakeYfTicker, "history", lambda self, **kwargs: pd.DataFrame({"Close": []}))
+    assert data_fetcher.get_realized_vol("IWM", MONDAY_MORNING) is None

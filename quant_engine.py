@@ -9,7 +9,7 @@ the open interest, so calls contribute positive and puts negative exposure.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -69,6 +69,24 @@ def bs_vanna(
     """Vanna = dDelta/dSigma = -e^(-qT) * phi(d1) * d2 / sigma, identical for calls and puts."""
     d1, d2 = _d1_d2(spot, strike, t, sigma, r, q)
     return -np.exp(-q * np.asarray(t)) * norm.pdf(d1) * d2 / np.asarray(sigma)
+
+
+def bs_charm(
+    spot: ArrayLike, strike: ArrayLike, t: ArrayLike, sigma: ArrayLike, r: float, q: float, is_call: ArrayLike
+) -> NDArray[np.float64]:
+    """Charm = dDelta/dt, the Delta decay per year as calendar time passes (T shrinks).
+
+    Call: q*e^(-qT)*N(d1) - e^(-qT)*phi(d1)*(2(r-q)T - d2*sigma*sqrt(T)) / (2T*sigma*sqrt(T))
+    Put:  same decay term, with -q*e^(-qT)*N(-d1) as carry (the call's charm minus q*e^(-qT)).
+    """
+    t = np.asarray(t, dtype=float)
+    d1, d2 = _d1_d2(spot, strike, t, sigma, r, q)
+    vol_sqrt_t = np.asarray(sigma) * np.sqrt(t)
+    discount = np.exp(-q * t)
+    pdf = np.exp(-0.5 * d1**2) / np.sqrt(2 * np.pi)  # phi(d1), cheaper than norm.pdf
+    decay = discount * pdf * (2 * (r - q) * t - d2 * vol_sqrt_t) / (2 * t * vol_sqrt_t)
+    carry = np.where(is_call, q * discount * ndtr(d1), -q * discount * ndtr(-d1))
+    return carry - decay
 
 
 def bs_price(spot: float, strike: float, t: float, sigma: float, r: float, q: float, option_type: str) -> float:
@@ -135,17 +153,22 @@ def _contract_inputs(
 
 
 def compute_exposures(chain: pd.DataFrame, spot: float, ticker: str, now: datetime) -> pd.DataFrame:
-    """Add per-contract ``gamma``, ``vanna``, ``gex`` and ``vex`` columns to a cleaned chain.
+    """Add per-contract ``gamma``, ``vanna``, ``charm``, ``gex``, ``vex`` and ``charm_exposure`` columns.
 
-    GEX = sign * Gamma * OI * 100 * S^2 * 0.01  ($ delta per 1 % move)
-    VEX = sign * Vanna * OI * 100 * S * 0.01    ($ delta per +1 vol point)
+    GEX   = sign * Gamma * OI * 100 * S^2 * 0.01  ($ delta per 1 % move)
+    VEX   = sign * Vanna * OI * 100 * S * 0.01    ($ delta per +1 vol point)
+    Charm = -sign * Charm * OI * 100 * S / 365    ($ dealers buy (+) or sell (-) per calendar day)
     """
     strike, t, sigma, weight, r, q = _contract_inputs(chain, ticker, now)
     df = chain.copy()
     df["gamma"] = bs_gamma(spot, strike, t, sigma, r, q)
     df["vanna"] = bs_vanna(spot, strike, t, sigma, r, q)
+    df["charm"] = bs_charm(spot, strike, t, sigma, r, q, chain["option_type"].to_numpy() == "call")
     df["gex"] = weight * df["gamma"] * spot**2 * config.SPOT_MOVE_PCT
     df["vex"] = weight * df["vanna"] * spot * config.VOL_POINT
+    # Charm is per year of T (365-day basis): dividing by 365 gives the drift per calendar day. The minus sign
+    # turns the dealers' delta drift into their hedge flow, so that a positive number reads as buying pressure.
+    df["charm_exposure"] = -weight * df["charm"] * spot / config.DAYS_PER_YEAR
     return df
 
 
@@ -216,7 +239,8 @@ def build_report(
     strikes inside ``spot +/- DISPLAY_RANGE_PCT[expiry_filter]``.
     """
     clean = clean_chain(chain, spot, now)
-    by_strike = aggregate_by_strike(compute_exposures(clean, spot, ticker, now))
+    exposures = compute_exposures(clean, spot, ticker, now)
+    by_strike = aggregate_by_strike(exposures)
     call_wall, put_wall = find_walls(by_strike)
 
     grid = np.linspace(
@@ -225,6 +249,7 @@ def build_report(
         config.ZERO_GAMMA_GRID_POINTS,
     )
     zero_gamma = find_zero_gamma(grid, gex_profile(clean, grid, ticker, now), spot)
+    iv = atm_iv(clean, spot, now)
 
     half_width = config.DISPLAY_RANGE_PCT[expiry_filter]
     low, high = spot * (1 - half_width), spot * (1 + half_width)
@@ -236,6 +261,102 @@ def build_report(
             "net_gex": float(by_strike["net_gex"].sum()),
             "net_vex": float(by_strike["net_vex"].sum()),
         },
+        "total_charm": float(exposures["charm_exposure"].sum()),
         "display_range": {"min": float(low), "max": float(high)},
         "strikes": shown.to_dict(orient="records"),
+        "atm_iv": iv,
+        **expected_move(spot, iv),
     }
+
+
+# --- Volatility analysis ------------------------------------------------------
+
+
+def sessions_to_expiry(expiration: date, now: datetime) -> float:
+    """Trading sessions left until the expiry close: the rest of today's session plus each later weekday.
+
+    Floored like ``time_to_expiry``, at ``MIN_T_MINUTES`` of a session.
+    shortcut: exchange holidays count as sessions and half days as full ones; add a holiday calendar
+    if an expiry spanning a holiday matters (for daily expiries, only outside the session).
+    """
+    local = now.astimezone(config.MARKET_TZ)
+    today = local.date()
+    open_ = datetime.combine(today, config.MARKET_OPEN, tzinfo=config.MARKET_TZ)
+    close = datetime.combine(today, config.MARKET_CLOSE, tzinfo=config.MARKET_TZ)
+    session = (close - open_).total_seconds()
+    left_today = (close - max(local, open_)).total_seconds() if np.is_busday(today) else 0.0
+    today_part = min(max(left_today, 0.0) / session, 1.0)
+    later = int(np.busday_count(today + timedelta(days=1), expiration + timedelta(days=1)))
+    return max(today_part + later, config.MIN_T_MINUTES * 60 / session)
+
+
+def atm_iv(chain: pd.DataFrame, spot: float, now: datetime) -> float | None:
+    """Mean call/put IV at the strike closest to spot on the shortest expiry, on a 252-session basis.
+
+    Chain IVs are calendar-time (T to the 16:00 close, 365-day basis): on a 0DTE they read ~2.3x a
+    session-based IV, because the option prices a whole session in a few calendar hours. The option's
+    total variance sigma^2 * T is therefore spread over the trading sessions left instead.
+    """
+    if chain.empty:
+        return None
+    expiry = chain["expiration"].min()
+    nearest = chain[chain["expiration"] == expiry]
+    strike = nearest["strike"].iloc[(nearest["strike"] - spot).abs().argmin()]
+    iv = nearest.loc[nearest["strike"] == strike, "implied_volatility"].mean()
+    t = time_to_expiry(pd.Series([expiry]), now)[0]
+    return float(iv * np.sqrt(t * config.TRADING_DAYS_PER_YEAR / sessions_to_expiry(expiry, now)))
+
+
+def expected_move(spot: float, iv: float | None) -> dict[str, float | None]:
+    """1-day expected move ``spot * iv * sqrt(1 / 252)``: in dollars, in percent and as bounds around spot."""
+    if iv is None:
+        return dict.fromkeys(("expected_move", "expected_move_pct", "em_upper", "em_lower"))
+    move = float(spot * iv * np.sqrt(1 / config.TRADING_DAYS_PER_YEAR))
+    return {
+        "expected_move": move,
+        "expected_move_pct": move / spot * 100,
+        "em_upper": spot + move,
+        "em_lower": spot - move,
+    }
+
+
+# --- Vanna surface ------------------------------------------------------------
+
+
+def calculate_vanna_surface(
+    chain_df: pd.DataFrame,
+    current_spot: float,
+    option_type: str = "All",
+    resolution: int = 20,
+    *,
+    ticker: str,
+    now: datetime,
+) -> dict[str, list[Any]]:
+    """Net VEX of the cleaned chain over simulated spots and IV shocks.
+
+    Spots span ``current_spot +/- VANNA_SURFACE_SPOT_PCT`` and IV multipliers span
+    ``VANNA_SURFACE_IV_SHOCK``, ``resolution`` points each. Every contract keeps its strike, T and
+    open interest (sticky strike); its IV is scaled by the shock and the spot replaced by the simulated
+    one. ``option_type`` is ``All``, ``call`` or ``put``. Returns ``{"x": spots, "y": IV multipliers,
+    "z": Net VEX}``, with one row of ``z`` per IV multiplier (the layout of a Plotly surface).
+    """
+    kind = option_type.lower()
+    if kind not in ("all", "call", "put"):
+        raise ValueError(f"option_type must be All, call or put, not {option_type!r}")
+    chain = clean_chain(chain_df, current_spot, now)
+    if kind != "all":
+        chain = chain[chain["option_type"] == kind]
+    strike, t, sigma, weight, r, q = _contract_inputs(chain, ticker, now)
+
+    pct = config.VANNA_SURFACE_SPOT_PCT
+    spots = np.linspace(current_spot * (1 - pct), current_spot * (1 + pct), resolution)
+    shocks = np.linspace(*config.VANNA_SURFACE_IV_SHOCK, resolution)
+    spot_grid, shock_grid = np.meshgrid(spots, shocks)  # shape (len(shocks), len(spots))
+    s, m = spot_grid.ravel(), shock_grid.ravel()
+    total = np.zeros(s.size)
+    for start in range(0, strike.size, config.ZERO_GAMMA_CHUNK_SIZE):  # contracts x grid points, in blocks
+        block = slice(start, start + config.ZERO_GAMMA_CHUNK_SIZE)
+        vanna = bs_vanna(s[None, :], strike[block, None], t[block, None], sigma[block, None] * m[None, :], r, q)
+        total += weight[block] @ vanna
+    z = total * s * config.VOL_POINT  # same VEX as compute_exposures, at the simulated spot
+    return {"x": spots.tolist(), "y": shocks.tolist(), "z": z.reshape(spot_grid.shape).tolist()}

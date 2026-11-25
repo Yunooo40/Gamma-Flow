@@ -10,8 +10,14 @@ Open-source dashboard that estimates **dealer positioning in options** for day t
 
 - Net GEX and net Vanna by strike, as a horizontal bar chart (Plotly), with Spot,
   Zero Gamma, Call Wall and Put Wall lines.
-- KPI cards: spot, Zero Gamma, Call Wall, Put Wall (each with its distance to spot)
-  and total net GEX and net VEX (positive / negative regime).
+- KPI cards: spot, Zero Gamma, Call Wall, Put Wall (each with its distance to spot),
+  total net GEX and net VEX (positive / negative regime) and net Charm per day
+  (whether dealers' hedging buys or sells into the close).
+- Volatility strip: ATM implied volatility against 20-day realized volatility (ratio
+  and spread), and the 1-day expected move, also drawn as two dotted lines on the chart.
+- On-demand **3D vanna surface** ("Analyze 3D Vanna Surface" button): net VEX over
+  simulated spots and IV shocks, computed only when asked so that the dashboard
+  itself stays fast.
 - Two expiry filters: **0DTE** (today's expiry, or the next one after the close, on
   weekends and holidays) and **All** (every expiry up to 45 days).
 - Data from **Alpaca** (free paper account) or **Massive** (formerly Polygon.io) when
@@ -60,6 +66,9 @@ d1    = (ln(S/K) + (r − q + σ²/2)·T) / (σ·√T)
 d2    = d1 − σ·√T
 Gamma = e^(−q·T) · φ(d1) / (S · σ · √T)          (same for calls and puts)
 Vanna = −e^(−q·T) · φ(d1) · d2 / σ               (∂Delta/∂σ, same for calls and puts)
+Charm = q·e^(−q·T)·N(d1) − e^(−q·T)·φ(d1)·(2(r−q)·T − d2·σ·√T) / (2T·σ·√T)
+                                                  (∂Delta/∂t as time passes, call; the put's
+                                                   is the call's minus q·e^(−q·T))
 ```
 
 **Implied volatility (Alpaca only).** The option price is the quote mid
@@ -83,10 +92,18 @@ open interest. `sign = +1` for calls, `−1` for puts.
 ```
 GEX = sign × Gamma × OI × 100 × S² × 0.01   → $ of delta per 1 % move of the underlying
 VEX = sign × Vanna × OI × 100 × S  × 0.01   → $ of delta per +1 volatility point
+CEX = −sign × Charm × OI × 100 × S / 365    → $ dealers buy (+) or sell (−) per calendar day
 ```
 
+**Reading the net Charm:** unlike GEX and VEX, its sign is the dealers' hedge flow,
+not their exposure, so that green always reads as buying pressure. Positive (green):
+the dealers' delta shrinks as time passes and they **buy** the underlying back (typical
+when out-of-the-money options dominate, since their deltas decay toward 0). Negative
+(red): their delta grows and they **sell**. The flow builds up over the session and is
+largest into the close and on expiry days.
+
 Exposures are summed per strike across all selected expiries (`call_gex`,
-`put_gex`, `net_gex`, `net_vex`), plus chain-wide totals.
+`put_gex`, `net_gex`, `net_vex`), plus chain-wide totals (net Charm is a total only).
 
 ### Key levels
 
@@ -107,6 +124,30 @@ displayed range:
 Contracts are dropped if they have missing values, open interest ≤ 0, an IV outside
 [1 %, 300 %], a strike outside spot ± 30 %, or have already expired.
 
+### Volatility and expected move
+
+- **ATM IV:** mean of the call and put IV at the strike closest to spot, on the
+  shortest expiry of the cleaned chain. Chain IVs are calendar-time (`T` to the
+  16:00 close, 365-day basis). On a 0DTE that reads about 2.3× a session-based IV,
+  because the option prices a whole session in a few calendar hours. The option's
+  total variance `σ²·T` is therefore spread over the trading sessions left until
+  the expiry (the rest of today's session plus each later weekday):
+  `IV_ATM = σ · √(T · 252 / sessions)`.
+- **Expected move (1 day):** `EM = S · IV_ATM · √(1/252)`, shown as `±$EM` and as the
+  bounds `S ± EM`.
+- **Realized volatility (20 days):** `std(log returns) · √252` over the last 20 daily
+  returns of completed sessions (21 adjusted closes from Alpaca, or yfinance as a
+  fallback, downloaded once per ticker and day).
+
+### Vanna surface
+
+Total net VEX of the cleaned chain on a 20 × 20 grid: simulated spots from −10 % to
++10 % around spot, and IV multipliers from ×0.80 to ×1.20. Every contract keeps its
+strike, `T` and open interest (sticky strike); its IV is scaled by the shock and the
+spot is replaced by the simulated one, with the same Vanna and VEX formulas as above.
+At the current spot and an unshocked IV, the surface equals the dashboard's net VEX.
+A full 45-day chain takes about 50 ms.
+
 ## Known limitations
 
 - **Open interest is published once a day** and reflects the previous close.
@@ -121,6 +162,9 @@ Contracts are dropped if they have missing values, open interest ≤ 0, an IV ou
   UI says so. Use the dashboard during the session.
 - yfinance data is unofficial and delayed; Massive data may be delayed depending
   on your plan.
+- The session count behind the ATM IV ignores exchange holidays and half days. This
+  only matters when the shortest expiry spans a holiday, which for daily expiries
+  happens outside the session.
 
 ## Configuration
 
@@ -142,8 +186,13 @@ bounds, dividend yields, host and port...) lives in [`config.py`](config.py).
 ### API
 
 - `GET /api/gex?ticker=SPY&expiry=0dte` (`expiry` is `0dte` or `all`): exposures,
-  levels and metadata as JSON. Returns `400` on invalid parameters and `502` if no
-  data source is available.
+  levels and metadata as JSON, plus `total_charm` ($ of delta per day), `atm_iv`,
+  `realized_vol` (decimals), `expected_move` ($), `expected_move_pct` (%), `em_upper`
+  and `em_lower`. Returns `400` on invalid parameters and `502` if no data
+  source is available.
+- `GET /api/vanna-surface?ticker=SPY&expiry=all` (`expiry` is `0dte` or `all`, as
+  for `/api/gex`): `{"x": spots, "y": IV multipliers, "z": net VEX}`, with one row of
+  `z` per IV multiplier. Same `400` / `502` errors as above.
 - `GET /api/health`: `{"status": "ok"}`.
 
 ## Tests

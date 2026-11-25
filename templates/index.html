@@ -60,36 +60,74 @@
       <ul id="banner-list" class="space-y-1"></ul>
     </div>
 
-    <section class="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-      <div class="card p-4">
+    <!-- Phone: 2 columns, Net Charm full width. Tablet / laptop: levels row (4) + exposures row (3). Wide: one row. -->
+    <section class="grid grid-cols-2 gap-3 md:grid-cols-12 xl:grid-cols-7">
+      <div class="card p-4 md:col-span-3 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Spot</div>
         <div id="kpi-spot" class="num mt-1 text-2xl text-white">–</div>
         <div id="kpi-spot-sub" class="num mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
-      <div class="card p-4">
+      <div class="card p-4 md:col-span-3 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Zero Gamma</div>
         <div id="kpi-zg" class="num mt-1 text-2xl text-violet-300">–</div>
         <div id="kpi-zg-sub" class="num mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
-      <div class="card p-4">
+      <div class="card p-4 md:col-span-3 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Call Wall</div>
         <div id="kpi-cw" class="num mt-1 text-2xl text-[#22c55e]">–</div>
         <div id="kpi-cw-sub" class="num mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
-      <div class="card p-4">
+      <div class="card p-4 md:col-span-3 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Put Wall</div>
         <div id="kpi-pw" class="num mt-1 text-2xl text-[#ef4444]">–</div>
         <div id="kpi-pw-sub" class="num mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
-      <div class="card p-4">
+      <div class="card p-4 md:col-span-4 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Net GEX</div>
         <div id="kpi-gex" class="num mt-1 text-2xl text-white">–</div>
         <div id="kpi-gex-sub" class="mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
-      <div class="card p-4">
+      <div class="card p-4 md:col-span-4 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Net VEX</div>
         <div id="kpi-vex" class="num mt-1 text-2xl text-white">–</div>
         <div id="kpi-vex-sub" class="mt-1 text-xs text-neutral-500">&nbsp;</div>
+      </div>
+      <div class="card col-span-2 p-4 md:col-span-4 xl:col-span-1">
+        <div class="text-[11px] uppercase tracking-wider text-neutral-500">Net Charm <span class="normal-case tracking-normal">/ day</span></div>
+        <div id="kpi-charm" class="num mt-1 text-2xl text-white">–</div>
+        <div id="kpi-charm-sub" class="mt-1 text-xs text-neutral-500">&nbsp;</div>
+      </div>
+    </section>
+
+    <section class="card flex flex-wrap items-center gap-x-6 gap-y-1 px-4 py-2 text-xs text-neutral-500" aria-label="Volatility">
+      <span>IV ATM <span id="vol-iv" class="num text-neutral-200">–</span></span>
+      <span>RV 20d <span id="vol-rv" class="num text-neutral-200">–</span></span>
+      <span>IV / RV <span id="vol-ratio" class="num text-neutral-200">–</span></span>
+      <span>Expected Move <span id="vol-em" class="num text-yellow-300">–</span></span>
+    </section>
+
+    <section>
+      <button id="vanna-3d-btn" type="button" aria-expanded="false" aria-controls="vanna-3d-container"
+        class="flex w-full items-center justify-center gap-2 rounded-md border border-cyan-500/30 bg-cyan-500/5 px-4 py-2 text-sm font-medium text-cyan-200 transition-colors hover:border-cyan-400/60 hover:bg-cyan-500/10 hover:text-white">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z"></path>
+          <path d="m3 7 9 5 9-5M12 12v10"></path>
+        </svg>
+        Analyze 3D Vanna Surface
+      </button>
+      <div id="vanna-3d-container" class="card mt-3 p-4" hidden>
+        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h2 id="vanna-3d-title" class="text-sm font-medium text-neutral-300">Net VEX surface</h2>
+          <span id="vanna-3d-loading" class="items-center gap-2 text-xs text-neutral-400" role="status" style="display: none">
+            <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" class="opacity-25"></circle>
+              <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"></path>
+            </svg>
+            Computing surface…
+          </span>
+        </div>
+        <p id="vanna-3d-error" class="text-sm text-red-400" role="alert" hidden></p>
+        <div id="vanna-3d" class="h-[60vh] min-h-[380px] w-full"></div>
       </div>
     </section>
 

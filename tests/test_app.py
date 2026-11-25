@@ -53,6 +53,12 @@ def client() -> FlaskClient:
     return app_module.app.test_client()
 
 
+@pytest.fixture(autouse=True)
+def fixed_realized_vol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The daily history must never be downloaded during tests."""
+    monkeypatch.setattr(data_fetcher, "get_realized_vol", lambda ticker: 0.12)
+
+
 def test_health(client: FlaskClient) -> None:
     assert client.get("/api/health").get_json() == {"status": "ok"}
 
@@ -84,6 +90,20 @@ def test_gex_payload(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> No
     assert payload["levels"]["call_wall"] == 605.0 and payload["levels"]["put_wall"] == 590.0
     assert payload["fetched_at"].endswith("Z")
     assert payload["strikes"] and set(payload["strikes"][0]) == {"strike", "call_gex", "put_gex", "net_gex", "net_vex"}
+    assert payload["realized_vol"] == 0.12 and payload["atm_iv"] > 0
+    move = payload["expected_move"]
+    assert payload["em_upper"] == pytest.approx(600.0 + move)
+    assert payload["em_lower"] == pytest.approx(600.0 - move)
+    assert isinstance(payload["total_charm"], float) and payload["total_charm"] != 0
+    assert payload["expected_move_pct"] == pytest.approx(move / 600.0 * 100)
+
+
+def test_missing_realized_vol_is_flagged(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(data_fetcher, "get_chain", fake_snapshot)
+    monkeypatch.setattr(data_fetcher, "get_realized_vol", lambda ticker: None)
+    payload = strict_json(client.get("/api/gex?ticker=SPY&expiry=all").get_data(as_text=True))
+    assert payload["realized_vol"] is None
+    assert "Realized volatility unavailable (no daily history)" in payload["warnings"]
 
 
 def test_nan_and_infinity_become_null(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,11 +115,43 @@ def test_nan_and_infinity_become_null(client: FlaskClient, monkeypatch: pytest.M
             "spot": 600.0,
             "levels": {"call_wall": float("nan"), "put_wall": 590.0, "zero_gamma": None},
             "totals": {"net_gex": float("inf"), "net_vex": float("-inf")},
+            "total_charm": float("nan"),
             "display_range": {"min": 540.0, "max": 660.0},
             "strikes": [{"strike": 600.0, "call_gex": float("nan"), "put_gex": 0.0, "net_gex": 0.0, "net_vex": 0.0}],
+            "atm_iv": float("nan"),
+            "expected_move": float("inf"),
+            "expected_move_pct": None,
+            "em_upper": None,
+            "em_lower": None,
         },
     )
     payload = strict_json(client.get("/api/gex?ticker=SPY&expiry=0dte").get_data(as_text=True))
+    assert payload["atm_iv"] is None and payload["expected_move"] is None
     assert payload["levels"]["call_wall"] is None
-    assert payload["totals"] == {"net_gex": None, "net_vex": None}
+    assert payload["totals"] == {"net_gex": None, "net_vex": None} and payload["total_charm"] is None
     assert payload["strikes"][0]["call_gex"] is None
+
+
+def test_vanna_surface(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    requested: list[tuple[str, str]] = []
+
+    def get_chain(ticker: str, expiry: str) -> data_fetcher.ChainSnapshot:
+        requested.append((ticker, expiry))
+        return fake_snapshot(ticker, expiry)
+
+    monkeypatch.setattr(data_fetcher, "get_chain", get_chain)
+    response = client.get("/api/vanna-surface?ticker=spy&expiry=all")
+    assert response.status_code == 200
+    assert requested == [("SPY", "all")]  # the expiry parameter is read, not the 0dte default
+
+    payload = strict_json(response.get_data(as_text=True))
+    assert set(payload) == {"x", "y", "z"}
+    assert len(payload["x"]) == len(payload["y"]) == len(payload["z"]) == 20
+    assert all(len(row) == 20 for row in payload["z"])
+    assert payload["x"][0] == pytest.approx(540.0) and payload["x"][-1] == pytest.approx(660.0)
+    assert payload["y"][0] == pytest.approx(0.8) and payload["y"][-1] == pytest.approx(1.2)
+
+
+@pytest.mark.parametrize("query", ["ticker=TSLA&expiry=all", "ticker=SPY&expiry=weekly"])
+def test_vanna_surface_rejects_invalid_parameters(client: FlaskClient, query: str) -> None:
+    assert client.get(f"/api/vanna-surface?{query}").status_code == 400

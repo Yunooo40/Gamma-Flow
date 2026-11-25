@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import norm
 
 import config
 import quant_engine as qe
@@ -36,6 +37,38 @@ def make_chain(rows: list[tuple[float, str, int, float]], expiration: date = EXP
 def test_black_scholes_reference_values() -> None:
     assert qe.bs_gamma(100, 100, 1, 0.20, 0.05, 0.0) == pytest.approx(0.018762, abs=1e-5)
     assert qe.bs_vanna(100, 100, 1, 0.20, 0.05, 0.0) == pytest.approx(-0.281430, abs=1e-5)
+    # -phi(0.35) * (2 * 0.05 - 0.15 * 0.20) / (2 * 0.20): an ATM call's delta drifts down toward 0.5.
+    assert qe.bs_charm(100, 100, 1, 0.20, 0.05, 0.0, True) == pytest.approx(-0.065667, abs=1e-5)
+
+
+def textbook_delta(strike: float, t: float, sigma: float, r: float, q: float, is_call: bool) -> float:
+    """Black-Scholes-Merton delta, written independently of the engine."""
+    d1 = (math.log(SPOT / strike) + (r - q + sigma**2 / 2) * t) / (sigma * math.sqrt(t))
+    return math.exp(-q * t) * (norm.cdf(d1) if is_call else norm.cdf(d1) - 1)
+
+
+@pytest.mark.parametrize("is_call", [True, False])
+@pytest.mark.parametrize("strike", [85.0, 98.0, 100.0, 103.0, 115.0])
+@pytest.mark.parametrize("t", [1 / 365, 7 / 365, 30 / 365, 1.0])
+def test_charm_is_the_time_derivative_of_delta(is_call: bool, strike: float, t: float) -> None:
+    sigma, r, q = 0.22, 0.04, 0.012
+    h = t * 1e-5
+    # Time passing shrinks T, hence the minus sign on the centred difference in T.
+    up, down = (textbook_delta(strike, t + dt, sigma, r, q, is_call) for dt in (h, -h))
+    expected = -(up - down) / (2 * h)
+    assert float(qe.bs_charm(SPOT, strike, t, sigma, r, q, is_call)) == pytest.approx(expected, rel=1e-5, abs=1e-8)
+
+
+def test_charm_exposure_follows_the_dealer_convention() -> None:
+    chain = make_chain([(105, "call", 10, 0.2), (95, "put", 10, 0.2), (90, "call", 10, 0.2)])
+    exposures = qe.compute_exposures(chain, SPOT, "SPY", NOW)
+    sign = np.array([1.0, -1.0, 1.0])
+    np.testing.assert_allclose(exposures["charm_exposure"], -sign * exposures["charm"] * 10 * 100 * SPOT / 365)
+    # OTM deltas decay toward 0, so dealers long the 105 call or short the 95 put lose delta and buy back
+    # their hedges as time passes (positive flow); the deep ITM 90 call's delta rises toward 1 (they sell).
+    assert exposures["charm_exposure"][0] > 0 and exposures["charm_exposure"][1] > 0 > exposures["charm_exposure"][2]
+    report = qe.build_report(chain, SPOT, "SPY", "all", NOW)
+    assert report["total_charm"] == pytest.approx(exposures["charm_exposure"].sum())
 
 
 def test_gamma_identical_for_call_and_put() -> None:
@@ -53,6 +86,7 @@ def test_expiry_in_one_minute_stays_finite() -> None:
 
     report = qe.build_report(chain, SPOT, "SPY", "0dte", now)
     values = [*report["totals"].values(), *(v for row in report["strikes"] for v in row.values())]
+    values += [report[key] for key in ("total_charm", "atm_iv", "expected_move", "em_upper", "em_lower")]
     assert report["strikes"] and all(math.isfinite(v) for v in values)
 
 
@@ -133,3 +167,73 @@ def test_calculate_iv_inverts_bs_price(option_type: str, strike: float) -> None:
 )
 def test_calculate_iv_returns_nan_when_unsolvable(price: float, strike: float, option_type: str) -> None:
     assert math.isnan(qe.calculate_iv(price, SPOT, strike, 30 / 365, 0.04, option_type))
+
+
+# --- Volatility analysis ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("expiration", "now", "expected"),
+    [
+        (date(2026, 11, 23), datetime(2026, 11, 23, 10, 0, tzinfo=NY), 6 / 6.5),  # 0DTE during the session
+        (date(2026, 11, 23), datetime(2026, 11, 23, 8, 0, tzinfo=NY), 1.0),  # 0DTE before the open
+        (date(2026, 11, 24), datetime(2026, 11, 23, 17, 0, tzinfo=NY), 1.0),  # next day, after the close
+        (date(2026, 11, 30), datetime(2026, 11, 28, 12, 0, tzinfo=NY), 1.0),  # Saturday to Monday
+        (date(2026, 12, 4), datetime(2026, 11, 30, 10, 0, tzinfo=NY), 6 / 6.5 + 4),  # Monday to Friday
+        (date(2026, 11, 23), datetime(2026, 11, 23, 15, 58, tzinfo=NY), 15 / 390),  # floored at 15 minutes
+    ],
+)
+def test_sessions_to_expiry(expiration: date, now: datetime, expected: float) -> None:
+    assert qe.sessions_to_expiry(expiration, now) == pytest.approx(expected)
+
+
+def test_atm_iv_uses_the_nearest_strike_of_the_shortest_expiry_on_a_session_basis() -> None:
+    today = date(2026, 11, 23)  # NOW is Monday 10:00 New York
+    chain = pd.concat(
+        [
+            make_chain([(99, "call", 10, 0.9), (100, "call", 10, 0.30), (100, "put", 10, 0.34)], expiration=today),
+            make_chain([(100, "call", 10, 0.5), (100, "put", 10, 0.5)], expiration=date(2026, 11, 27)),
+        ],
+        ignore_index=True,
+    )
+    t = qe.time_to_expiry(pd.Series([today]), NOW)[0]
+    expected = 0.32 * math.sqrt(t * config.TRADING_DAYS_PER_YEAR / (6 / 6.5))  # mean of 0.30 and 0.34
+    assert qe.atm_iv(chain, 100.2, NOW) == pytest.approx(expected)
+    assert expected == pytest.approx(0.32 / 2.31, rel=0.01)  # a 0DTE calendar IV reads ~2.3x a session IV
+    assert qe.atm_iv(chain.iloc[0:0], 100.0, NOW) is None
+
+
+def test_expected_move() -> None:
+    em = qe.expected_move(SPOT, 0.16)
+    assert em["expected_move"] == pytest.approx(SPOT * 0.16 * math.sqrt(1 / 252))
+    assert em["expected_move_pct"] == pytest.approx(em["expected_move"] / SPOT * 100)
+    assert em["em_upper"] == pytest.approx(SPOT + em["expected_move"])
+    assert em["em_lower"] == pytest.approx(SPOT - em["expected_move"])
+    assert set(qe.expected_move(SPOT, None).values()) == {None}
+
+
+# --- Vanna surface ------------------------------------------------------------
+
+
+def test_vanna_surface_is_consistent_with_the_dashboard() -> None:
+    chain = make_chain([(95, "put", 300, 0.22), (100, "call", 500, 0.20), (100, "put", 200, 0.21), (105, "call", 400, 0.19)])
+    surface = qe.calculate_vanna_surface(chain, SPOT, resolution=21, ticker="SPY", now=NOW)
+    z = np.array(surface["z"])
+    assert z.shape == (21, 21)
+    assert surface["x"][0] == pytest.approx(90.0) and surface["x"][-1] == pytest.approx(110.0)
+    assert surface["y"][0] == pytest.approx(0.8) and surface["y"][-1] == pytest.approx(1.2)
+
+    # Centre of the grid (current spot, unshocked IV): the dashboard's total net VEX.
+    assert z[10, 10] == pytest.approx(qe.build_report(chain, SPOT, "SPY", "all", NOW)["totals"]["net_vex"])
+    # One row per IV shock, one column per spot: corner = IV x0.8 at spot +10 %.
+    shocked = chain.assign(implied_volatility=chain["implied_volatility"] * 0.8)
+    assert z[0, -1] == pytest.approx(qe.compute_exposures(shocked, 110.0, "SPY", NOW)["vex"].sum())
+
+    calls = qe.calculate_vanna_surface(chain, SPOT, "call", 21, ticker="SPY", now=NOW)["z"]
+    puts = qe.calculate_vanna_surface(chain, SPOT, "put", 21, ticker="SPY", now=NOW)["z"]
+    np.testing.assert_allclose(np.array(calls) + np.array(puts), z)
+
+
+def test_vanna_surface_rejects_an_unknown_option_type() -> None:
+    with pytest.raises(ValueError):
+        qe.calculate_vanna_surface(make_chain([(100, "call", 10, 0.2)]), SPOT, "straddle", ticker="SPY", now=NOW)

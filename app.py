@@ -63,9 +63,12 @@ def gex() -> Response:
         return _json_response({"error": "Market data unavailable"}, 502)
 
     report = quant_engine.build_report(snapshot.chain, snapshot.spot, ticker, expiry, datetime.now(timezone.utc))
+    realized_vol = data_fetcher.get_realized_vol(ticker)
     warnings = list(snapshot.warnings)
     if not report["strikes"]:
         warnings.append("No contract with valid open interest and IV in the displayed range")
+    if realized_vol is None:
+        warnings.append("Realized volatility unavailable (no daily history)")
 
     return _json_response(
         {
@@ -80,11 +83,39 @@ def gex() -> Response:
             "expiry_fallback": snapshot.expiry_fallback,
             "levels": report["levels"],
             "totals": report["totals"],
+            "total_charm": report["total_charm"],
             "display_range": report["display_range"],
             "strikes": report["strikes"],
+            "atm_iv": report["atm_iv"],
+            "realized_vol": realized_vol,
+            "expected_move": report["expected_move"],
+            "expected_move_pct": report["expected_move_pct"],
+            "em_upper": report["em_upper"],
+            "em_lower": report["em_lower"],
             "warnings": warnings,
         }
     )
+
+
+@app.get("/api/vanna-surface")
+def vanna_surface() -> Response:
+    """Net VEX over simulated spots and IV shocks, computed on demand from the cached chain."""
+    ticker = request.args.get("ticker", "").strip().upper()
+    expiry = request.args.get("expiry", "0dte").strip().lower()
+    if ticker not in config.TICKERS:
+        return _json_response({"error": f"Invalid ticker, expected one of: {', '.join(config.TICKERS)}"}, 400)
+    if expiry not in config.EXPIRY_FILTERS:
+        return _json_response({"error": f"Invalid expiry, expected one of: {', '.join(config.EXPIRY_FILTERS)}"}, 400)
+
+    try:
+        snapshot = data_fetcher.get_chain(ticker, expiry)
+    except data_fetcher.DataUnavailableError:
+        return _json_response({"error": "Market data unavailable"}, 502)
+
+    surface = quant_engine.calculate_vanna_surface(
+        snapshot.chain, snapshot.spot, ticker=ticker, now=datetime.now(timezone.utc)
+    )
+    return _json_response(surface)
 
 
 @app.errorhandler(500)
