@@ -9,7 +9,7 @@ the open interest, so calls contribute positive and puts negative exposure.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import numpy as np
@@ -31,10 +31,23 @@ CHAIN_COLUMNS: tuple[str, ...] = (
 SECONDS_PER_YEAR: int = config.DAYS_PER_YEAR * 24 * 3600
 
 
+def market_close(day: date) -> time:
+    """New York close of a session: ``EARLY_CLOSE`` (13:00) on NYSE half days, else ``MARKET_CLOSE``.
+
+    Half days: the day after Thanksgiving (the one Friday from November 23 to 29) and the
+    ``EARLY_CLOSE_EVES`` from Monday to Thursday.
+    shortcut: rule-based, no exchange calendar; check the rules if the NYSE changes its half days.
+    """
+    after_thanksgiving = day.month == 11 and day.weekday() == 4 and 23 <= day.day <= 29
+    eve = (day.month, day.day) in config.EARLY_CLOSE_EVES and day.weekday() <= 3
+    return config.EARLY_CLOSE if after_thanksgiving or eve else config.MARKET_CLOSE
+
+
 def expiry_timestamps(expirations: pd.Series) -> pd.Series:
-    """Convert expiration dates to tz-aware timestamps at the New York market close."""
-    close = pd.Timedelta(hours=config.MARKET_CLOSE.hour, minutes=config.MARKET_CLOSE.minute)
-    return (pd.to_datetime(expirations) + close).dt.tz_localize(config.MARKET_TZ)
+    """Convert expiration dates to tz-aware timestamps at that day's New York close (13:00 on half days)."""
+    days = pd.to_datetime(expirations).dt.date
+    closes = {day: datetime.combine(day, market_close(day)) for day in days.unique()}  # a few distinct expiries
+    return pd.to_datetime(days.map(closes)).dt.tz_localize(config.MARKET_TZ)
 
 
 def time_to_expiry(expirations: pd.Series, now: datetime) -> NDArray[np.float64]:
@@ -233,7 +246,7 @@ def find_zero_gamma(spot_grid: NDArray[np.float64], profile: NDArray[np.float64]
 def build_report(
     chain: pd.DataFrame, spot: float, ticker: str, expiry_filter: str, now: datetime
 ) -> dict[str, Any]:
-    """Compute exposures and key levels for a raw chain.
+    """Compute exposures and key levels for a raw chain: every key is sent as is by ``/api/gex``.
 
     Levels and totals use the whole cleaned chain; ``strikes`` only keeps the
     strikes inside ``spot +/- DISPLAY_RANGE_PCT[expiry_filter]``.
@@ -254,14 +267,15 @@ def build_report(
     half_width = config.DISPLAY_RANGE_PCT[expiry_filter]
     low, high = spot * (1 - half_width), spot * (1 + half_width)
     shown = by_strike[by_strike["strike"].between(low, high)]
+    known = not clean.empty  # with no valid contract the totals are unknown: a $0 would read as a positive regime
     return {
         "spot": float(spot),
         "levels": {"call_wall": call_wall, "put_wall": put_wall, "zero_gamma": zero_gamma},
         "totals": {
-            "net_gex": float(by_strike["net_gex"].sum()),
-            "net_vex": float(by_strike["net_vex"].sum()),
+            "net_gex": float(by_strike["net_gex"].sum()) if known else None,
+            "net_vex": float(by_strike["net_vex"].sum()) if known else None,
         },
-        "total_charm": float(exposures["charm_exposure"].sum()),
+        "total_charm": float(exposures["charm_exposure"].sum()) if known else None,
         "display_range": {"min": float(low), "max": float(high)},
         "strikes": shown.to_dict(orient="records"),
         "atm_iv": iv,
@@ -275,14 +289,15 @@ def build_report(
 def sessions_to_expiry(expiration: date, now: datetime) -> float:
     """Trading sessions left until the expiry close: the rest of today's session plus each later weekday.
 
-    Floored like ``time_to_expiry``, at ``MIN_T_MINUTES`` of a session.
-    shortcut: exchange holidays count as sessions and half days as full ones; add a holiday calendar
+    Floored like ``time_to_expiry``, at ``MIN_T_MINUTES`` of a session. Today's session ends at its real
+    close, 13:00 on a half day.
+    shortcut: exchange holidays count as sessions and a later half day as a full one; add a holiday calendar
     if an expiry spanning a holiday matters (for daily expiries, only outside the session).
     """
     local = now.astimezone(config.MARKET_TZ)
     today = local.date()
     open_ = datetime.combine(today, config.MARKET_OPEN, tzinfo=config.MARKET_TZ)
-    close = datetime.combine(today, config.MARKET_CLOSE, tzinfo=config.MARKET_TZ)
+    close = datetime.combine(today, market_close(today), tzinfo=config.MARKET_TZ)
     session = (close - open_).total_seconds()
     left_today = (close - max(local, open_)).total_seconds() if np.is_busday(today) else 0.0
     today_part = min(max(left_today, 0.0) / session, 1.0)

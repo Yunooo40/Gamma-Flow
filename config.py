@@ -53,6 +53,10 @@ VOL_POINT: float = 0.01  # VEX is expressed per 1 volatility point
 MARKET_TZ: ZoneInfo = ZoneInfo("America/New_York")
 MARKET_OPEN: time = time(9, 30)
 MARKET_CLOSE: time = time(16, 0)
+EARLY_CLOSE: time = time(13, 0)  # NYSE half days, see quant_engine.market_close
+# Half days fixed by date (month, day): the eves of Independence Day and Christmas, from Monday to Thursday only
+# (on a Friday they are the observed holiday: market closed). The day after Thanksgiving is computed.
+EARLY_CLOSE_EVES: tuple[tuple[int, int], ...] = ((7, 3), (12, 24))
 
 # --- Data sources -------------------------------------------------------------
 ALPACA_KEY: str = os.getenv("ALPACA_KEY", "").strip()

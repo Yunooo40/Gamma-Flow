@@ -73,15 +73,19 @@ Charm = q·e^(−q·T)·N(d1) − e^(−q·T)·φ(d1)·(2(r−q)·T − d2·σ·
 
 **Implied volatility (Alpaca only).** The option price is the quote mid
 `(bid + ask) / 2`; with a one-sided or empty book it falls back to the last trade,
-then the day's close. The IV is the `σ` where the BSM price above equals that price,
+then the day's close, but only if they date from the last session (the latest day any
+contract of the chain traded): an older price was paid when the spot was elsewhere, so
+the contract is dropped instead. The IV is the `σ` where the BSM price above equals that price,
 solved with Brent's method (`scipy.optimize.brentq`) in `[0.01 %, 1000 %]`. A price at
 or below intrinsic value, or with no root in that range, leaves the IV empty and the
 contract is dropped. Because `T` is calendar time, a 0DTE IV before the open looks
 high (the price covers the whole session); Gamma only depends on `σ·√T` and is not
 affected.
 
-`T` is the time to the 16:00 New York close of the expiry day, in years
-(365-day basis), floored at 15 minutes so that Greeks stay finite near expiry.
+`T` is the time to the New York close of the expiry day, in years (365-day basis),
+floored at 15 minutes so that Greeks stay finite near expiry. The close is 16:00, or
+13:00 on the NYSE half days: the day after Thanksgiving, and July 3 and December 24
+when they fall from Monday to Thursday (on a Friday they are the observed holiday).
 Greeks are always recomputed from the IV, even when the source provides its own.
 
 ### Exposures
@@ -162,9 +166,11 @@ A full 45-day chain takes about 50 ms.
   UI says so. Use the dashboard during the session.
 - yfinance data is unofficial and delayed; Massive data may be delayed depending
   on your plan.
-- The session count behind the ATM IV ignores exchange holidays and half days. This
-  only matters when the shortest expiry spans a holiday, which for daily expiries
-  happens outside the session.
+- The session count behind the ATM IV ignores exchange holidays, and counts a half
+  day after today as a full session. This only matters when the shortest expiry spans
+  one of them, which for daily expiries happens outside the session.
+- Half days follow fixed rules (`quant_engine.market_close`), not an exchange
+  calendar: check them if the NYSE changes its schedule.
 
 ## Configuration
 
@@ -188,8 +194,8 @@ bounds, dividend yields, host and port...) lives in [`config.py`](config.py).
 - `GET /api/gex?ticker=SPY&expiry=0dte` (`expiry` is `0dte` or `all`): exposures,
   levels and metadata as JSON, plus `total_charm` ($ of delta per day), `atm_iv`,
   `realized_vol` (decimals), `expected_move` ($), `expected_move_pct` (%), `em_upper`
-  and `em_lower`. Returns `400` on invalid parameters and `502` if no data
-  source is available.
+  and `em_lower`. Totals are `null` when no contract is valid. Returns `400` on
+  invalid parameters and `502` if no data source is available.
 - `GET /api/vanna-surface?ticker=SPY&expiry=all` (`expiry` is `0dte` or `all`, as
   for `/api/gex`): `{"x": spots, "y": IV multipliers, "z": net VEX}`, with one row of
   `z` per IV multiplier. Same `400` / `502` errors as above.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -88,6 +88,36 @@ def test_expiry_in_one_minute_stays_finite() -> None:
     values = [*report["totals"].values(), *(v for row in report["strikes"] for v in row.values())]
     values += [report[key] for key in ("total_charm", "atm_iv", "expected_move", "em_upper", "em_lower")]
     assert report["strikes"] and all(math.isfinite(v) for v in values)
+
+
+@pytest.mark.parametrize(
+    ("day", "close"),
+    [
+        (date(2026, 11, 27), time(13, 0)),  # the day after Thanksgiving
+        (date(2027, 11, 26), time(13, 0)),
+        (date(2026, 12, 24), time(13, 0)),  # Christmas Eve on a Thursday
+        (date(2028, 7, 3), time(13, 0)),  # July 3 on a Monday
+        (date(2026, 7, 3), time(16, 0)),  # a Friday: the observed Independence Day, market closed
+        (date(2027, 12, 24), time(16, 0)),  # a Friday: the observed Christmas
+        (date(2026, 11, 20), time(16, 0)),  # an ordinary Friday
+    ],
+)
+def test_market_close(day: date, close: time) -> None:
+    assert qe.market_close(day) == close
+
+
+def test_half_day_after_thanksgiving_expires_at_13h() -> None:
+    friday = date(2026, 11, 27)
+    ten = datetime(2026, 11, 27, 10, 0, tzinfo=NY)
+    assert qe.time_to_expiry(pd.Series([friday]), ten)[0] * qe.SECONDS_PER_YEAR == pytest.approx(3 * 3600)
+    assert qe.sessions_to_expiry(friday, ten) == pytest.approx(3 / 3.5)  # 3 of the session's 3.5 hours left
+    chain = make_chain([(100, "call", 10, 0.2)], expiration=friday)
+    assert qe.clean_chain(chain, SPOT, datetime(2026, 11, 27, 13, 30, tzinfo=NY)).empty  # expired at 13:00
+
+
+def test_totals_are_unknown_without_a_valid_contract() -> None:
+    report = qe.build_report(make_chain([(100, "call", 0, 0.2), (100, "put", 0, 0.2)]), SPOT, "SPY", "all", NOW)
+    assert report["totals"] == {"net_gex": None, "net_vex": None} and report["total_charm"] is None
 
 
 def test_exposure_signs() -> None:
