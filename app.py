@@ -83,14 +83,15 @@ def gex() -> Response:
             "expiry_fallback": snapshot.expiry_fallback,
             "levels": report["levels"],
             "totals": report["totals"],
+            "total_charm": report["total_charm"],
             "display_range": report["display_range"],
             "strikes": report["strikes"],
             "atm_iv": report["atm_iv"],
             "realized_vol": realized_vol,
             "expected_move": report["expected_move"],
             "expected_move_pct": report["expected_move_pct"],
-            "expected_move_upper": report["expected_move_upper"],
-            "expected_move_lower": report["expected_move_lower"],
+            "em_upper": report["em_upper"],
+            "em_lower": report["em_lower"],
             "warnings": warnings,
         }
     )

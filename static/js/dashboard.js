@@ -8,10 +8,11 @@ const COLORS = {
   negative: "#ef4444",
   spot: "#e5e7eb",
   zeroGamma: "#c4b5fd",
-  expectedMove: "#67e8f9",
+  expectedMove: "#fde047",
   grid: "#1c2027",
   text: "#9ca3af",
 };
+const LABEL_HEIGHT_PX = 20; // a level label (10 px font + padding): two closer than this overlap
 // ColorBrewer RdYlGn (plotly.js has no such named scale): red for negative VEX, green for positive.
 const RDYLGN = ["#a50026", "#d73027", "#f46d43", "#fdae61", "#fee08b", "#ffffbf", "#d9ef8b", "#a6d96a", "#66bd63", "#1a9850", "#006837"]
   .map((color, i, all) => [i / (all.length - 1), color]);
@@ -83,11 +84,11 @@ function setLevel(id, level, spot, missingText) {
   $(`kpi-${id}-sub`).textContent = level == null || spot == null ? missingText : fmtDistance(level, spot);
 }
 
-function setTotal(id, value, greek) {
+function setTotal(id, value, [positiveText, negativeText]) {
   const el = $(`kpi-${id}`);
   el.textContent = fmtMoney(value);
   el.style.color = value == null ? "" : value >= 0 ? COLORS.positive : COLORS.negative;
-  $(`kpi-${id}-sub`).textContent = value == null ? "–" : `${value >= 0 ? "Positive" : "Negative"} ${greek}`;
+  $(`kpi-${id}-sub`).textContent = value == null ? "–" : value >= 0 ? positiveText : negativeText;
 }
 
 function renderHeader(d) {
@@ -115,8 +116,10 @@ function renderKpis(d) {
   setLevel("cw", d.levels.call_wall, d.spot, "–");
   setLevel("pw", d.levels.put_wall, d.spot, "–");
 
-  setTotal("gex", d.totals.net_gex, "gamma");
-  setTotal("vex", d.totals.net_vex, "vanna");
+  setTotal("gex", d.totals.net_gex, ["Positive gamma", "Negative gamma"]);
+  setTotal("vex", d.totals.net_vex, ["Positive vanna", "Negative vanna"]);
+  // total_charm is the dealers' hedge flow: positive = they buy the underlying as time passes.
+  setTotal("charm", d.total_charm, ["Dealers buy into close", "Dealers sell into close"]);
 }
 
 function renderVolatility(d) {
@@ -132,7 +135,7 @@ function renderVolatility(d) {
   $("vol-em").textContent =
     d.expected_move == null
       ? "–"
-      : `±$${d.expected_move.toFixed(2)} (${fmtPrice(d.expected_move_lower)} – ${fmtPrice(d.expected_move_upper)})`;
+      : `±$${d.expected_move.toFixed(2)} (${fmtPrice(d.em_lower)} – ${fmtPrice(d.em_upper)})`;
 }
 
 function levelLines(d) {
@@ -142,9 +145,8 @@ function levelLines(d) {
     { y: d.levels.zero_gamma, label: "Zero Gamma", color: COLORS.zeroGamma, dash: "dot", width: 1.5 },
     { y: d.levels.call_wall, label: "Call Wall", color: COLORS.positive, dash: "solid", width: 1 },
     { y: d.levels.put_wall, label: "Put Wall", color: COLORS.negative, dash: "solid", width: 1 },
-    // Labelled on the left: the move often lands near a wall or Zero Gamma, labelled on the right.
-    { y: d.expected_move_upper, label: "EM high", color: COLORS.expectedMove, dash: "dash", width: 1, left: true },
-    { y: d.expected_move_lower, label: "EM low", color: COLORS.expectedMove, dash: "dash", width: 1, left: true },
+    { y: d.em_upper, label: "EM high", color: COLORS.expectedMove, dash: "dot", width: 1, em: true },
+    { y: d.em_lower, label: "EM low", color: COLORS.expectedMove, dash: "dot", width: 1, em: true },
   ].filter((line) => line.y != null && line.y >= min && line.y <= max);
 }
 
@@ -175,11 +177,15 @@ function renderChart() {
   const lines = levelLines(d);
   // shortcut: screen size is read at each render, not on resize; add a resize listener if rotation matters.
   const small = window.innerWidth < 768;
+  const margin = { l: 56, r: small ? 8 : 16, t: 8, b: 40 };
+  // The move often lands next to a wall or Zero Gamma: an EM label that would cover theirs goes on the left.
+  const pxPerDollar = ($("chart").clientHeight - margin.t - margin.b) / (d.display_range.max - d.display_range.min);
+  const crowded = (em) => lines.some((line) => !line.em && Math.abs(line.y - em.y) * pxPerDollar < LABEL_HEIGHT_PX);
   const layout = {
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
     font: { color: COLORS.text, size: 11, family: "ui-monospace, SFMono-Regular, Menlo, monospace" },
-    margin: { l: 56, r: small ? 8 : 16, t: 8, b: 40 },
+    margin,
     bargap: 0.15,
     showlegend: false,
     hoverlabel: { bgcolor: "#111318", bordercolor: "#374151", font: { color: "#e5e7eb" } },
@@ -205,19 +211,22 @@ function renderChart() {
       y1: line.y,
       line: { color: line.color, width: line.width, dash: line.dash },
     })),
-    annotations: lines.map((line) => ({
-      xref: "paper",
-      x: line.left ? 0.02 : 0.98,
-      xanchor: line.left ? "left" : "right",
-      yref: "y",
-      y: line.y,
-      yanchor: "bottom",
-      text: `${line.label} ${line.y.toFixed(2)}`,
-      showarrow: false,
-      font: { color: line.color, size: 10 },
-      bgcolor: "rgba(15, 23, 42, 0.85)", // stays readable over bars of the same color
-      borderpad: 3,
-    })),
+    annotations: lines.map((line) => {
+      const left = line.em && crowded(line);
+      return {
+        xref: "paper",
+        x: left ? 0.02 : 0.98,
+        xanchor: left ? "left" : "right",
+        yref: "y",
+        y: line.y,
+        yanchor: "bottom",
+        text: `${line.label} ${line.y.toFixed(2)}`,
+        showarrow: false,
+        font: { color: line.color, size: 10 },
+        bgcolor: "rgba(15, 23, 42, 0.85)", // stays readable over bars of the same color
+        borderpad: 3,
+      };
+    }),
   };
   Plotly.react("chart", [trace], layout, {
     responsive: true,
@@ -236,12 +245,13 @@ function render() {
 
 function clearDisplay() {
   state.data = null;
-  for (const id of ["kpi-spot", "kpi-zg", "kpi-cw", "kpi-pw", "kpi-gex", "kpi-vex", "vol-iv", "vol-rv", "vol-ratio", "vol-em"]) {
+  for (const id of ["kpi-spot", "kpi-zg", "kpi-cw", "kpi-pw", "kpi-gex", "kpi-vex", "kpi-charm", "vol-iv", "vol-rv", "vol-ratio", "vol-em"]) {
     $(id).textContent = "–";
   }
-  for (const id of ["kpi-spot-sub", "kpi-zg-sub", "kpi-cw-sub", "kpi-pw-sub", "kpi-gex-sub", "kpi-vex-sub"]) {
+  for (const id of ["kpi-spot-sub", "kpi-zg-sub", "kpi-cw-sub", "kpi-pw-sub", "kpi-gex-sub", "kpi-vex-sub", "kpi-charm-sub"]) {
     $(id).textContent = "";
   }
+  for (const id of ["kpi-gex", "kpi-vex", "kpi-charm"]) $(id).style.color = ""; // no green / red dash
   $("source-badge").textContent = "–";
   $("updated").textContent = "–";
   Plotly.purge("chart");

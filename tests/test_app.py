@@ -92,8 +92,9 @@ def test_gex_payload(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> No
     assert payload["strikes"] and set(payload["strikes"][0]) == {"strike", "call_gex", "put_gex", "net_gex", "net_vex"}
     assert payload["realized_vol"] == 0.12 and payload["atm_iv"] > 0
     move = payload["expected_move"]
-    assert payload["expected_move_upper"] == pytest.approx(600.0 + move)
-    assert payload["expected_move_lower"] == pytest.approx(600.0 - move)
+    assert payload["em_upper"] == pytest.approx(600.0 + move)
+    assert payload["em_lower"] == pytest.approx(600.0 - move)
+    assert isinstance(payload["total_charm"], float) and payload["total_charm"] != 0
     assert payload["expected_move_pct"] == pytest.approx(move / 600.0 * 100)
 
 
@@ -114,19 +115,20 @@ def test_nan_and_infinity_become_null(client: FlaskClient, monkeypatch: pytest.M
             "spot": 600.0,
             "levels": {"call_wall": float("nan"), "put_wall": 590.0, "zero_gamma": None},
             "totals": {"net_gex": float("inf"), "net_vex": float("-inf")},
+            "total_charm": float("nan"),
             "display_range": {"min": 540.0, "max": 660.0},
             "strikes": [{"strike": 600.0, "call_gex": float("nan"), "put_gex": 0.0, "net_gex": 0.0, "net_vex": 0.0}],
             "atm_iv": float("nan"),
             "expected_move": float("inf"),
             "expected_move_pct": None,
-            "expected_move_upper": None,
-            "expected_move_lower": None,
+            "em_upper": None,
+            "em_lower": None,
         },
     )
     payload = strict_json(client.get("/api/gex?ticker=SPY&expiry=0dte").get_data(as_text=True))
     assert payload["atm_iv"] is None and payload["expected_move"] is None
     assert payload["levels"]["call_wall"] is None
-    assert payload["totals"] == {"net_gex": None, "net_vex": None}
+    assert payload["totals"] == {"net_gex": None, "net_vex": None} and payload["total_charm"] is None
     assert payload["strikes"][0]["call_gex"] is None
 
 

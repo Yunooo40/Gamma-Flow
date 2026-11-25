@@ -71,6 +71,24 @@ def bs_vanna(
     return -np.exp(-q * np.asarray(t)) * norm.pdf(d1) * d2 / np.asarray(sigma)
 
 
+def bs_charm(
+    spot: ArrayLike, strike: ArrayLike, t: ArrayLike, sigma: ArrayLike, r: float, q: float, is_call: ArrayLike
+) -> NDArray[np.float64]:
+    """Charm = dDelta/dt, the Delta decay per year as calendar time passes (T shrinks).
+
+    Call: q*e^(-qT)*N(d1) - e^(-qT)*phi(d1)*(2(r-q)T - d2*sigma*sqrt(T)) / (2T*sigma*sqrt(T))
+    Put:  same decay term, with -q*e^(-qT)*N(-d1) as carry (the call's charm minus q*e^(-qT)).
+    """
+    t = np.asarray(t, dtype=float)
+    d1, d2 = _d1_d2(spot, strike, t, sigma, r, q)
+    vol_sqrt_t = np.asarray(sigma) * np.sqrt(t)
+    discount = np.exp(-q * t)
+    pdf = np.exp(-0.5 * d1**2) / np.sqrt(2 * np.pi)  # phi(d1), cheaper than norm.pdf
+    decay = discount * pdf * (2 * (r - q) * t - d2 * vol_sqrt_t) / (2 * t * vol_sqrt_t)
+    carry = np.where(is_call, q * discount * ndtr(d1), -q * discount * ndtr(-d1))
+    return carry - decay
+
+
 def bs_price(spot: float, strike: float, t: float, sigma: float, r: float, q: float, option_type: str) -> float:
     """Black-Scholes-Merton price of a European call or put."""
     d1, d2 = _d1_d2(spot, strike, t, sigma, r, q)
@@ -135,17 +153,22 @@ def _contract_inputs(
 
 
 def compute_exposures(chain: pd.DataFrame, spot: float, ticker: str, now: datetime) -> pd.DataFrame:
-    """Add per-contract ``gamma``, ``vanna``, ``gex`` and ``vex`` columns to a cleaned chain.
+    """Add per-contract ``gamma``, ``vanna``, ``charm``, ``gex``, ``vex`` and ``charm_exposure`` columns.
 
-    GEX = sign * Gamma * OI * 100 * S^2 * 0.01  ($ delta per 1 % move)
-    VEX = sign * Vanna * OI * 100 * S * 0.01    ($ delta per +1 vol point)
+    GEX   = sign * Gamma * OI * 100 * S^2 * 0.01  ($ delta per 1 % move)
+    VEX   = sign * Vanna * OI * 100 * S * 0.01    ($ delta per +1 vol point)
+    Charm = -sign * Charm * OI * 100 * S / 365    ($ dealers buy (+) or sell (-) per calendar day)
     """
     strike, t, sigma, weight, r, q = _contract_inputs(chain, ticker, now)
     df = chain.copy()
     df["gamma"] = bs_gamma(spot, strike, t, sigma, r, q)
     df["vanna"] = bs_vanna(spot, strike, t, sigma, r, q)
+    df["charm"] = bs_charm(spot, strike, t, sigma, r, q, chain["option_type"].to_numpy() == "call")
     df["gex"] = weight * df["gamma"] * spot**2 * config.SPOT_MOVE_PCT
     df["vex"] = weight * df["vanna"] * spot * config.VOL_POINT
+    # Charm is per year of T (365-day basis): dividing by 365 gives the drift per calendar day. The minus sign
+    # turns the dealers' delta drift into their hedge flow, so that a positive number reads as buying pressure.
+    df["charm_exposure"] = -weight * df["charm"] * spot / config.DAYS_PER_YEAR
     return df
 
 
@@ -216,7 +239,8 @@ def build_report(
     strikes inside ``spot +/- DISPLAY_RANGE_PCT[expiry_filter]``.
     """
     clean = clean_chain(chain, spot, now)
-    by_strike = aggregate_by_strike(compute_exposures(clean, spot, ticker, now))
+    exposures = compute_exposures(clean, spot, ticker, now)
+    by_strike = aggregate_by_strike(exposures)
     call_wall, put_wall = find_walls(by_strike)
 
     grid = np.linspace(
@@ -237,6 +261,7 @@ def build_report(
             "net_gex": float(by_strike["net_gex"].sum()),
             "net_vex": float(by_strike["net_vex"].sum()),
         },
+        "total_charm": float(exposures["charm_exposure"].sum()),
         "display_range": {"min": float(low), "max": float(high)},
         "strikes": shown.to_dict(orient="records"),
         "atm_iv": iv,
@@ -285,13 +310,13 @@ def atm_iv(chain: pd.DataFrame, spot: float, now: datetime) -> float | None:
 def expected_move(spot: float, iv: float | None) -> dict[str, float | None]:
     """1-day expected move ``spot * iv * sqrt(1 / 252)``: in dollars, in percent and as bounds around spot."""
     if iv is None:
-        return dict.fromkeys(("expected_move", "expected_move_pct", "expected_move_upper", "expected_move_lower"))
+        return dict.fromkeys(("expected_move", "expected_move_pct", "em_upper", "em_lower"))
     move = float(spot * iv * np.sqrt(1 / config.TRADING_DAYS_PER_YEAR))
     return {
         "expected_move": move,
         "expected_move_pct": move / spot * 100,
-        "expected_move_upper": spot + move,
-        "expected_move_lower": spot - move,
+        "em_upper": spot + move,
+        "em_lower": spot - move,
     }
 
 

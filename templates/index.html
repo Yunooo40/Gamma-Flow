@@ -60,36 +60,42 @@
       <ul id="banner-list" class="space-y-1"></ul>
     </div>
 
-    <section class="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-      <div class="card p-4">
+    <!-- Phone: 2 columns, Net Charm full width. Tablet / laptop: levels row (4) + exposures row (3). Wide: one row. -->
+    <section class="grid grid-cols-2 gap-3 md:grid-cols-12 xl:grid-cols-7">
+      <div class="card p-4 md:col-span-3 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Spot</div>
         <div id="kpi-spot" class="num mt-1 text-2xl text-white">–</div>
         <div id="kpi-spot-sub" class="num mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
-      <div class="card p-4">
+      <div class="card p-4 md:col-span-3 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Zero Gamma</div>
         <div id="kpi-zg" class="num mt-1 text-2xl text-violet-300">–</div>
         <div id="kpi-zg-sub" class="num mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
-      <div class="card p-4">
+      <div class="card p-4 md:col-span-3 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Call Wall</div>
         <div id="kpi-cw" class="num mt-1 text-2xl text-[#22c55e]">–</div>
         <div id="kpi-cw-sub" class="num mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
-      <div class="card p-4">
+      <div class="card p-4 md:col-span-3 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Put Wall</div>
         <div id="kpi-pw" class="num mt-1 text-2xl text-[#ef4444]">–</div>
         <div id="kpi-pw-sub" class="num mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
-      <div class="card p-4">
+      <div class="card p-4 md:col-span-4 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Net GEX</div>
         <div id="kpi-gex" class="num mt-1 text-2xl text-white">–</div>
         <div id="kpi-gex-sub" class="mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
-      <div class="card p-4">
+      <div class="card p-4 md:col-span-4 xl:col-span-1">
         <div class="text-[11px] uppercase tracking-wider text-neutral-500">Net VEX</div>
         <div id="kpi-vex" class="num mt-1 text-2xl text-white">–</div>
         <div id="kpi-vex-sub" class="mt-1 text-xs text-neutral-500">&nbsp;</div>
+      </div>
+      <div class="card col-span-2 p-4 md:col-span-4 xl:col-span-1">
+        <div class="text-[11px] uppercase tracking-wider text-neutral-500">Net Charm <span class="normal-case tracking-normal">/ day</span></div>
+        <div id="kpi-charm" class="num mt-1 text-2xl text-white">–</div>
+        <div id="kpi-charm-sub" class="mt-1 text-xs text-neutral-500">&nbsp;</div>
       </div>
     </section>
 
@@ -97,7 +103,7 @@
       <span>IV ATM <span id="vol-iv" class="num text-neutral-200">–</span></span>
       <span>RV 20d <span id="vol-rv" class="num text-neutral-200">–</span></span>
       <span>IV / RV <span id="vol-ratio" class="num text-neutral-200">–</span></span>
-      <span>Expected Move <span id="vol-em" class="num text-cyan-300">–</span></span>
+      <span>Expected Move <span id="vol-em" class="num text-yellow-300">–</span></span>
     </section>
 
     <section>

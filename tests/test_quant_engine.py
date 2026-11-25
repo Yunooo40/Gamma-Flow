@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import norm
 
 import config
 import quant_engine as qe
@@ -36,6 +37,38 @@ def make_chain(rows: list[tuple[float, str, int, float]], expiration: date = EXP
 def test_black_scholes_reference_values() -> None:
     assert qe.bs_gamma(100, 100, 1, 0.20, 0.05, 0.0) == pytest.approx(0.018762, abs=1e-5)
     assert qe.bs_vanna(100, 100, 1, 0.20, 0.05, 0.0) == pytest.approx(-0.281430, abs=1e-5)
+    # -phi(0.35) * (2 * 0.05 - 0.15 * 0.20) / (2 * 0.20): an ATM call's delta drifts down toward 0.5.
+    assert qe.bs_charm(100, 100, 1, 0.20, 0.05, 0.0, True) == pytest.approx(-0.065667, abs=1e-5)
+
+
+def textbook_delta(strike: float, t: float, sigma: float, r: float, q: float, is_call: bool) -> float:
+    """Black-Scholes-Merton delta, written independently of the engine."""
+    d1 = (math.log(SPOT / strike) + (r - q + sigma**2 / 2) * t) / (sigma * math.sqrt(t))
+    return math.exp(-q * t) * (norm.cdf(d1) if is_call else norm.cdf(d1) - 1)
+
+
+@pytest.mark.parametrize("is_call", [True, False])
+@pytest.mark.parametrize("strike", [85.0, 98.0, 100.0, 103.0, 115.0])
+@pytest.mark.parametrize("t", [1 / 365, 7 / 365, 30 / 365, 1.0])
+def test_charm_is_the_time_derivative_of_delta(is_call: bool, strike: float, t: float) -> None:
+    sigma, r, q = 0.22, 0.04, 0.012
+    h = t * 1e-5
+    # Time passing shrinks T, hence the minus sign on the centred difference in T.
+    up, down = (textbook_delta(strike, t + dt, sigma, r, q, is_call) for dt in (h, -h))
+    expected = -(up - down) / (2 * h)
+    assert float(qe.bs_charm(SPOT, strike, t, sigma, r, q, is_call)) == pytest.approx(expected, rel=1e-5, abs=1e-8)
+
+
+def test_charm_exposure_follows_the_dealer_convention() -> None:
+    chain = make_chain([(105, "call", 10, 0.2), (95, "put", 10, 0.2), (90, "call", 10, 0.2)])
+    exposures = qe.compute_exposures(chain, SPOT, "SPY", NOW)
+    sign = np.array([1.0, -1.0, 1.0])
+    np.testing.assert_allclose(exposures["charm_exposure"], -sign * exposures["charm"] * 10 * 100 * SPOT / 365)
+    # OTM deltas decay toward 0, so dealers long the 105 call or short the 95 put lose delta and buy back
+    # their hedges as time passes (positive flow); the deep ITM 90 call's delta rises toward 1 (they sell).
+    assert exposures["charm_exposure"][0] > 0 and exposures["charm_exposure"][1] > 0 > exposures["charm_exposure"][2]
+    report = qe.build_report(chain, SPOT, "SPY", "all", NOW)
+    assert report["total_charm"] == pytest.approx(exposures["charm_exposure"].sum())
 
 
 def test_gamma_identical_for_call_and_put() -> None:
@@ -53,7 +86,7 @@ def test_expiry_in_one_minute_stays_finite() -> None:
 
     report = qe.build_report(chain, SPOT, "SPY", "0dte", now)
     values = [*report["totals"].values(), *(v for row in report["strikes"] for v in row.values())]
-    values += [report[key] for key in ("atm_iv", "expected_move", "expected_move_upper", "expected_move_lower")]
+    values += [report[key] for key in ("total_charm", "atm_iv", "expected_move", "em_upper", "em_lower")]
     assert report["strikes"] and all(math.isfinite(v) for v in values)
 
 
@@ -174,8 +207,8 @@ def test_expected_move() -> None:
     em = qe.expected_move(SPOT, 0.16)
     assert em["expected_move"] == pytest.approx(SPOT * 0.16 * math.sqrt(1 / 252))
     assert em["expected_move_pct"] == pytest.approx(em["expected_move"] / SPOT * 100)
-    assert em["expected_move_upper"] == pytest.approx(SPOT + em["expected_move"])
-    assert em["expected_move_lower"] == pytest.approx(SPOT - em["expected_move"])
+    assert em["em_upper"] == pytest.approx(SPOT + em["expected_move"])
+    assert em["em_lower"] == pytest.approx(SPOT - em["expected_move"])
     assert set(qe.expected_move(SPOT, None).values()) == {None}
 
 
