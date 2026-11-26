@@ -205,6 +205,14 @@ def test_0dte_falls_back_on_weekends() -> None:
     )
 
 
+def test_0dte_on_the_half_day_after_thanksgiving_closes_at_13h() -> None:
+    friday, monday = date(2026, 11, 27), date(2026, 11, 30)
+    noon = datetime(2026, 11, 27, 12, 0, tzinfo=NY)
+    assert data_fetcher.select_expirations([friday, monday], "0dte", noon) == ([friday], False, [])
+    expirations, fallback, warnings = data_fetcher.select_expirations([friday, monday], "0dte", noon + timedelta(hours=2))
+    assert expirations == [monday] and fallback and warnings == ["Today's expiry has closed, using 2026-11-30"]
+
+
 def test_all_keeps_live_expiries_within_max_dte() -> None:
     far = MONDAY + timedelta(days=config.MAX_DTE_ALL + 1)
     expirations, fallback, _ = data_fetcher.select_expirations(
@@ -250,7 +258,7 @@ def test_alpaca_solves_iv_from_option_prices(
     snaps2 = {
         "snapshots": {
             # No bid: the book is ignored and the last trade is used.
-            "SPY261123P00595000": {"latestQuote": {"bp": 0, "ap": put + 1}, "latestTrade": {"p": put}},
+            "SPY261123P00595000": {"latestQuote": {"bp": 0, "ap": put + 1}, "latestTrade": {"p": put, "t": "2026-11-23T14:58:00Z"}},
             "SPY261123C00650000": {"latestQuote": {"bp": 0, "ap": 0}},  # no price at all
             "SPY261124C00600000": {"latestQuote": {"bp": 1.0, "ap": 1.2}},  # not the nearest expiry
         }
@@ -272,6 +280,25 @@ def test_alpaca_solves_iv_from_option_prices(
     assert iv[600.0] == pytest.approx(0.15, rel=1e-6) and iv[595.0] == pytest.approx(0.17, rel=1e-6)
     assert math.isnan(iv[650.0])
     assert tuple(snap.chain.columns) == CHAIN_COLUMNS
+
+
+def test_alpaca_fallback_prices_must_date_from_the_last_session() -> None:
+    monday, friday = "2026-11-23T15:10:00.123456789Z", "2026-11-20T20:59:00Z"  # 10:10 and 15:59 New York
+    snapshots = {
+        "SPY261123C00600000": {"latestTrade": {"p": 2.0, "t": monday}},  # the newest trade: Monday is the last session
+        "SPY261123P00590000": {"latestQuote": {"bp": 0, "ap": 0.01}, "latestTrade": {"p": 0.30, "t": friday}},
+        "SPY261123P00580000": {"dailyBar": {"c": 0.05, "t": "2026-11-20T05:00:00Z"}},  # Friday's bar
+        "SPY261123C00620000": {"dailyBar": {"c": 0.02, "t": "2026-11-23T05:00:00Z"}},  # Monday's bar
+        "SPY261123C00630000": {"latestTrade": {"p": 0.01}},  # no timestamp
+    }
+    chain = data_fetcher._parse_alpaca_chain(snapshots, {})
+    prices = dict(zip(chain["strike"], chain["price"]))
+    assert prices[600.0] == 2.0 and prices[620.0] == 0.02
+    assert all(math.isnan(prices[strike]) for strike in (590.0, 580.0, 630.0))  # stale or undated: skipped
+
+    # On Thanksgiving the newest trade is Wednesday's: that is the last session, its prices are kept.
+    holiday = {"SPY261127C00600000": {"latestTrade": {"p": 1.5, "t": "2026-11-25T20:59:00Z"}}}
+    assert data_fetcher._parse_alpaca_chain(holiday, {})["price"].tolist() == [1.5]
 
 
 # --- Realized volatility ------------------------------------------------------

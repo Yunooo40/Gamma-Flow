@@ -8,7 +8,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-from flask import Flask, Response, render_template, request
+from flask import Flask, Response, abort, render_template, request
 
 import config
 import data_fetcher
@@ -48,20 +48,23 @@ def health() -> Response:
     return _json_response({"status": "ok"})
 
 
-@app.get("/api/gex")
-def gex() -> Response:
+def _requested_chain() -> tuple[str, str, data_fetcher.ChainSnapshot]:
+    """The request's ``ticker`` and ``expiry`` and their chain; aborts with a JSON 400 or 502."""
     ticker = request.args.get("ticker", "").strip().upper()
     expiry = request.args.get("expiry", "0dte").strip().lower()
     if ticker not in config.TICKERS:
-        return _json_response({"error": f"Invalid ticker, expected one of: {', '.join(config.TICKERS)}"}, 400)
+        abort(_json_response({"error": f"Invalid ticker, expected one of: {', '.join(config.TICKERS)}"}, 400))
     if expiry not in config.EXPIRY_FILTERS:
-        return _json_response({"error": f"Invalid expiry, expected one of: {', '.join(config.EXPIRY_FILTERS)}"}, 400)
-
+        abort(_json_response({"error": f"Invalid expiry, expected one of: {', '.join(config.EXPIRY_FILTERS)}"}, 400))
     try:
-        snapshot = data_fetcher.get_chain(ticker, expiry)
+        return ticker, expiry, data_fetcher.get_chain(ticker, expiry)
     except data_fetcher.DataUnavailableError:
-        return _json_response({"error": "Market data unavailable"}, 502)
+        abort(_json_response({"error": "Market data unavailable"}, 502))
 
+
+@app.get("/api/gex")
+def gex() -> Response:
+    ticker, expiry, snapshot = _requested_chain()
     report = quant_engine.build_report(snapshot.chain, snapshot.spot, ticker, expiry, datetime.now(timezone.utc))
     realized_vol = data_fetcher.get_realized_vol(ticker)
     warnings = list(snapshot.warnings)
@@ -78,20 +81,10 @@ def gex() -> Response:
             "timeframe": snapshot.timeframe,
             "fetched_at": snapshot.fetched_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "cached": snapshot.cached,
-            "spot": report["spot"],
             "expirations": [d.isoformat() for d in snapshot.expirations],
             "expiry_fallback": snapshot.expiry_fallback,
-            "levels": report["levels"],
-            "totals": report["totals"],
-            "total_charm": report["total_charm"],
-            "display_range": report["display_range"],
-            "strikes": report["strikes"],
-            "atm_iv": report["atm_iv"],
+            **report,  # levels, totals, strikes, volatility: a new metric of build_report reaches the UI as is
             "realized_vol": realized_vol,
-            "expected_move": report["expected_move"],
-            "expected_move_pct": report["expected_move_pct"],
-            "em_upper": report["em_upper"],
-            "em_lower": report["em_lower"],
             "warnings": warnings,
         }
     )
@@ -100,18 +93,7 @@ def gex() -> Response:
 @app.get("/api/vanna-surface")
 def vanna_surface() -> Response:
     """Net VEX over simulated spots and IV shocks, computed on demand from the cached chain."""
-    ticker = request.args.get("ticker", "").strip().upper()
-    expiry = request.args.get("expiry", "0dte").strip().lower()
-    if ticker not in config.TICKERS:
-        return _json_response({"error": f"Invalid ticker, expected one of: {', '.join(config.TICKERS)}"}, 400)
-    if expiry not in config.EXPIRY_FILTERS:
-        return _json_response({"error": f"Invalid expiry, expected one of: {', '.join(config.EXPIRY_FILTERS)}"}, 400)
-
-    try:
-        snapshot = data_fetcher.get_chain(ticker, expiry)
-    except data_fetcher.DataUnavailableError:
-        return _json_response({"error": "Market data unavailable"}, 502)
-
+    ticker, _, snapshot = _requested_chain()
     surface = quant_engine.calculate_vanna_surface(
         snapshot.chain, snapshot.spot, ticker=ticker, now=datetime.now(timezone.utc)
     )

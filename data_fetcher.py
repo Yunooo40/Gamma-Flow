@@ -28,7 +28,7 @@ import requests
 import yfinance as yf
 
 import config
-from quant_engine import CHAIN_COLUMNS, calculate_iv, time_to_expiry
+from quant_engine import CHAIN_COLUMNS, calculate_iv, market_close, time_to_expiry
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +74,24 @@ class ChainSnapshot:
 
 
 def _market_now(now: datetime) -> tuple[date, bool]:
-    """Return today's date in New York and whether the market close is still ahead."""
+    """Return today's date in New York and whether today's close (13:00 on half days) is still ahead."""
     local = now.astimezone(config.MARKET_TZ)
-    return local.date(), local.time() < config.MARKET_CLOSE
+    return local.date(), local.time() < market_close(local.date())
 
 
 def _is_live(expiration: date, today: date, before_close: bool) -> bool:
-    """True if the expiry's 16:00 New York close has not passed yet."""
+    """True if the expiry's New York close has not passed yet."""
     return expiration > today or (expiration == today and before_close)
+
+
+def _expiry_window(expiry_filter: str, now: datetime) -> tuple[date, date]:
+    """First and last expiry to download: from today (tomorrow after the close), over
+    ``MASSIVE_0DTE_LOOKAHEAD_DAYS`` for 0dte and up to ``MAX_DTE_ALL`` days for all."""
+    today, before_close = _market_now(now)
+    first = today if before_close else today + timedelta(days=1)
+    if expiry_filter == "0dte":
+        return first, first + timedelta(days=config.MASSIVE_0DTE_LOOKAHEAD_DAYS)
+    return first, today + timedelta(days=config.MAX_DTE_ALL)
 
 
 def select_expirations(
@@ -128,19 +138,17 @@ def _valid_price(price: float) -> bool:
     return math.isfinite(price) and price > 0
 
 
-# --- Source A: Alpaca ---------------------------------------------------------
-
-_OCC = re.compile(r"^[A-Z]{1,6}(\d{6})([CP])(\d{8})$")
+# --- HTTP ---------------------------------------------------------------------
 
 
-def _alpaca_get(session: requests.Session, url: str, params: dict[str, Any]) -> dict[str, Any]:
-    """GET one Alpaca page; any failure becomes a ``_SourceError``."""
+def _get_json(session: requests.Session, url: str, params: dict[str, Any] | None, auth_hint: str) -> dict[str, Any]:
+    """GET one JSON page; any failure becomes a ``_SourceError`` (``auth_hint`` explains a 401 / 403)."""
     try:
         response = session.get(url, params=params, timeout=config.HTTP_TIMEOUT)
     except requests.RequestException as exc:
         raise _SourceError(f"request failed ({type(exc).__name__})") from exc
     if response.status_code in (401, 403):
-        raise _SourceError(f"HTTP {response.status_code}, check the Alpaca keys")
+        raise _SourceError(f"HTTP {response.status_code}, {auth_hint}")
     if response.status_code != 200:
         raise _SourceError(f"HTTP {response.status_code}")
     try:
@@ -152,11 +160,17 @@ def _alpaca_get(session: requests.Session, url: str, params: dict[str, Any]) -> 
     return payload
 
 
+# --- Source A: Alpaca ---------------------------------------------------------
+
+_OCC = re.compile(r"^[A-Z]{1,6}(\d{6})([CP])(\d{8})$")
+_ALPACA_AUTH_HINT = "check the Alpaca keys"
+
+
 def _alpaca_pages(session: requests.Session, url: str, params: dict[str, Any], key: str) -> Iterable[Any]:
     """Items under ``key`` across all pages (``next_page_token``)."""
     params = dict(params)
     for _ in range(config.ALPACA_MAX_PAGES):
-        payload = _alpaca_get(session, url, params)
+        payload = _get_json(session, url, params, _ALPACA_AUTH_HINT)
         yield from (payload.get(key) or {}).items() if key == "snapshots" else payload.get(key) or []
         token = payload.get("next_page_token")
         if not token:
@@ -165,22 +179,39 @@ def _alpaca_pages(session: requests.Session, url: str, params: dict[str, Any], k
     raise _SourceError(f"more than {config.ALPACA_MAX_PAGES} pages")
 
 
-def _alpaca_price(snap: dict[str, Any]) -> float:
-    """Option price: quote mid, else last trade, else the day's close; NaN if none (contract skipped)."""
+def _ny_date(timestamp: Any) -> date | None:
+    """New York date of an Alpaca timestamp (RFC 3339 in UTC, e.g. ``2026-11-23T15:10:00.123456789Z``), or None."""
+    try:
+        utc = datetime.fromisoformat(str(timestamp)[:19]).replace(tzinfo=timezone.utc)  # to the second: enough for a date
+    except ValueError:  # missing or malformed: the price it dates is not used
+        return None
+    return utc.astimezone(config.MARKET_TZ).date()
+
+
+def _alpaca_price(snap: dict[str, Any], session: date | None) -> float:
+    """Option price: quote mid, else last trade, else the day's close; NaN if none (contract skipped).
+
+    The last trade and the daily bar only count when they date from ``session``, the last trading session:
+    an older price was paid when the spot was elsewhere and would give a wrong IV.
+    """
     quote = snap.get("latestQuote") or {}
     bid, ask = quote.get("bp") or 0, quote.get("ap") or 0
     if bid > 0 and ask > 0:
         return (bid + ask) / 2
-    # One-sided or empty book (pre-market, weekend): fall back to the last known price.
+    # One-sided or empty book (pre-market, weekend, far strikes): fall back to the last session's price.
     for bar, key in (("latestTrade", "p"), ("dailyBar", "c")):
-        price = (snap.get(bar) or {}).get(key) or 0
-        if price > 0:
+        data = snap.get(bar) or {}
+        price = data.get(key) or 0
+        if price > 0 and session is not None and _ny_date(data.get("t")) == session:
             return float(price)
     return math.nan
 
 
 def _parse_alpaca_chain(snapshots: dict[str, Any], open_interest: dict[str, Any]) -> pd.DataFrame:
     """Raw chain rows with the option ``price``, from snapshots (by OCC symbol) joined with open interest."""
+    # The last trading session is the latest day any contract traded: holidays need no calendar.
+    trade_days = (_ny_date(((snap or {}).get("latestTrade") or {}).get("t")) for snap in snapshots.values())
+    session = max((day for day in trade_days if day), default=None)
     rows = []
     for symbol, snap in snapshots.items():
         match = _OCC.match(symbol)
@@ -193,16 +224,14 @@ def _parse_alpaca_chain(snapshots: dict[str, Any], open_interest: dict[str, Any]
                 "option_type": "call" if kind == "C" else "put",
                 "expiration": datetime.strptime(yymmdd, "%y%m%d").date(),
                 "open_interest": open_interest.get(symbol),
-                "price": _alpaca_price(snap or {}),
+                "price": _alpaca_price(snap or {}, session),
             }
         )
     return pd.DataFrame(rows, columns=["strike", "option_type", "expiration", "open_interest", "price"])
 
 
 def _fetch_alpaca(ticker: str, expiry_filter: str, now: datetime) -> ChainSnapshot:
-    today, before_close = _market_now(now)
-    first = today if before_close else today + timedelta(days=1)
-    last = first + timedelta(days=config.MASSIVE_0DTE_LOOKAHEAD_DAYS) if expiry_filter == "0dte" else today + timedelta(days=config.MAX_DTE_ALL)
+    first, last = _expiry_window(expiry_filter, now)
     window = {"expiration_date_gte": first.isoformat(), "expiration_date_lte": last.isoformat()}
 
     with requests.Session() as session:
@@ -228,7 +257,9 @@ def _fetch_alpaca(ticker: str, expiry_filter: str, now: datetime) -> ChainSnapsh
             )
         }
         try:
-            trade = _alpaca_get(session, f"{config.ALPACA_DATA_URL}/v2/stocks/{ticker}/trades/latest", {"feed": "iex"})
+            trade = _get_json(
+                session, f"{config.ALPACA_DATA_URL}/v2/stocks/{ticker}/trades/latest", {"feed": "iex"}, _ALPACA_AUTH_HINT
+            )
             spot: float | None = float(trade["trade"]["p"])
         except (_SourceError, KeyError, TypeError, ValueError):
             spot = None
@@ -286,25 +317,6 @@ def _parse_massive_underlying(flat: pd.DataFrame) -> tuple[float | None, str | N
     )
 
 
-def _massive_get(session: requests.Session, url: str, params: dict[str, Any] | None) -> dict[str, Any]:
-    """GET one Massive page; any failure becomes a ``_SourceError``."""
-    try:
-        response = session.get(url, params=params, timeout=config.HTTP_TIMEOUT)
-    except requests.RequestException as exc:
-        raise _SourceError(f"request failed ({type(exc).__name__})") from exc
-    if response.status_code in (401, 403):
-        raise _SourceError(f"HTTP {response.status_code}, check that the key includes options data")
-    if response.status_code != 200:
-        raise _SourceError(f"HTTP {response.status_code}")
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise _SourceError("invalid JSON") from exc
-    if not isinstance(payload, dict):
-        raise _SourceError("unexpected payload")
-    return payload
-
-
 def _fetch_massive_results(ticker: str, first: date, last: date) -> list[dict[str, Any]]:
     """All snapshot results between two expiry dates, following ``next_url``."""
     url: str | None = f"{config.MASSIVE_BASE_URL}/v3/snapshot/options/{ticker}"
@@ -319,7 +331,7 @@ def _fetch_massive_results(ticker: str, first: date, last: date) -> list[dict[st
         # Header auth: the key never appears in a URL or a log line.
         session.headers["Authorization"] = f"Bearer {config.MASSIVE_API_KEY}"
         for _ in range(config.MASSIVE_MAX_PAGES):
-            payload = _massive_get(session, url, params)
+            payload = _get_json(session, url, params, "check that the key includes options data")
             results.extend(payload.get("results") or [])
             url, params = payload.get("next_url"), None
             if not url:
@@ -330,14 +342,7 @@ def _fetch_massive_results(ticker: str, first: date, last: date) -> list[dict[st
 
 
 def _fetch_massive(ticker: str, expiry_filter: str, now: datetime) -> ChainSnapshot:
-    today, before_close = _market_now(now)
-    first = today if before_close else today + timedelta(days=1)
-    if expiry_filter == "0dte":
-        last = first + timedelta(days=config.MASSIVE_0DTE_LOOKAHEAD_DAYS)
-    else:
-        last = today + timedelta(days=config.MAX_DTE_ALL)
-
-    results = _fetch_massive_results(ticker, first, last)
+    results = _fetch_massive_results(ticker, *_expiry_window(expiry_filter, now))
     if not results:
         raise _SourceError("empty response")
     flat = pd.json_normalize(results)

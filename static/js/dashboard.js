@@ -51,6 +51,16 @@ function fmtDistance(level, spot) {
   return `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% vs spot`;
 }
 
+function fmtTimeET(date) {
+  return date.toLocaleTimeString("en-US", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
 function setPressed(groupId, key, value) {
   for (const button of $(groupId).querySelectorAll("button")) {
     button.setAttribute("aria-pressed", String(button.dataset[key] === value));
@@ -98,14 +108,7 @@ function renderHeader(d) {
   badge.textContent = d.source in names ? `${names[d.source]} · ${d.timeframe ?? "unknown"}` : "yfinance · delayed";
   badge.className = `badge ${delayed ? "badge-delayed" : "badge-live"}`;
 
-  const time = new Date(d.fetched_at).toLocaleTimeString("en-US", {
-    timeZone: "America/New_York",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-  $("updated").textContent = `Updated ${time} ET${d.cached ? " (cached)" : ""}`;
+  $("updated").textContent = `Updated ${fmtTimeET(new Date(d.fetched_at))} ET${d.cached ? " (cached)" : ""}`;
 }
 
 function renderKpis(d) {
@@ -145,8 +148,8 @@ function levelLines(d) {
     { y: d.levels.zero_gamma, label: "Zero Gamma", color: COLORS.zeroGamma, dash: "dot", width: 1.5 },
     { y: d.levels.call_wall, label: "Call Wall", color: COLORS.positive, dash: "solid", width: 1 },
     { y: d.levels.put_wall, label: "Put Wall", color: COLORS.negative, dash: "solid", width: 1 },
-    { y: d.em_upper, label: "EM high", color: COLORS.expectedMove, dash: "dot", width: 1, em: true },
-    { y: d.em_lower, label: "EM low", color: COLORS.expectedMove, dash: "dot", width: 1, em: true },
+    { y: d.em_upper, label: "EM high", color: COLORS.expectedMove, dash: "dot", width: 1 },
+    { y: d.em_lower, label: "EM low", color: COLORS.expectedMove, dash: "dot", width: 1 },
   ].filter((line) => line.y != null && line.y >= min && line.y <= max);
 }
 
@@ -178,9 +181,15 @@ function renderChart() {
   // shortcut: screen size is read at each render, not on resize; add a resize listener if rotation matters.
   const small = window.innerWidth < 768;
   const margin = { l: 56, r: small ? 8 : 16, t: 8, b: 40 };
-  // The move often lands next to a wall or Zero Gamma: an EM label that would cover theirs goes on the left.
   const pxPerDollar = ($("chart").clientHeight - margin.t - margin.b) / (d.display_range.max - d.display_range.min);
-  const crowded = (em) => lines.some((line) => !line.em && Math.abs(line.y - em.y) * pxPerDollar < LABEL_HEIGHT_PX);
+  // Labels sit on the right, above their line. From the top down, one that would cover the label above it is
+  // pushed just below that label, so levels bunched around spot stay readable.
+  let lowestEdge = -Infinity; // px from the top of the plot
+  for (const line of [...lines].sort((a, b) => b.y - a.y)) {
+    const top = (d.display_range.max - line.y) * pxPerDollar - LABEL_HEIGHT_PX;
+    line.shift = Math.max(0, lowestEdge - top);
+    lowestEdge = top + line.shift + LABEL_HEIGHT_PX;
+  }
   const layout = {
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
@@ -211,22 +220,20 @@ function renderChart() {
       y1: line.y,
       line: { color: line.color, width: line.width, dash: line.dash },
     })),
-    annotations: lines.map((line) => {
-      const left = line.em && crowded(line);
-      return {
-        xref: "paper",
-        x: left ? 0.02 : 0.98,
-        xanchor: left ? "left" : "right",
-        yref: "y",
-        y: line.y,
-        yanchor: "bottom",
-        text: `${line.label} ${line.y.toFixed(2)}`,
-        showarrow: false,
-        font: { color: line.color, size: 10 },
-        bgcolor: "rgba(15, 23, 42, 0.85)", // stays readable over bars of the same color
-        borderpad: 3,
-      };
-    }),
+    annotations: lines.map((line) => ({
+      xref: "paper",
+      x: 0.98,
+      xanchor: "right",
+      yref: "y",
+      y: line.y,
+      yanchor: "bottom",
+      yshift: -line.shift,
+      text: `${line.label} ${line.y.toFixed(2)}`,
+      showarrow: false,
+      font: { color: line.color, size: 10 },
+      bgcolor: "rgba(15, 23, 42, 0.85)", // stays readable over bars of the same color
+      borderpad: 3,
+    })),
   };
   Plotly.react("chart", [trace], layout, {
     responsive: true,
@@ -347,6 +354,7 @@ async function loadVannaSurface() {
     if (seq !== vannaSeq) return; // a newer request or a selection change superseded this one
     if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
     renderVannaSurface(body);
+    $("vanna-3d-title").textContent += ` · ${fmtTimeET(new Date())} ET`; // computed once, not auto-refreshed
   } catch (error) {
     if (seq !== vannaSeq) return;
     Plotly.purge("vanna-3d");
